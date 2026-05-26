@@ -1,0 +1,27 @@
+# 🦾 Anos — AI Native OS Container
+services:
+  anos:
+    image: ghcr.io/datnp1003/anos:latest
+    container_name: anos
+    restart: unless-stopped
+    environment:
+      ANOS_DIR: /opt/anos
+      ANOS_API_KEY: ${ANOS_API_KEY}
+    ports:
+      - "8788:8787"
+    volumes:
+      - anos_config:/opt/anos/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "echo", "/ping", "|", "/usr/local/bin/anos-cli", "--raw"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  anos_config:

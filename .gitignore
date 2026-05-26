@@ -1,0 +1,7 @@
+# AnosOS
+*.iso
+*.squashfs
+*.img
+/tmp/
+/output/
+.DS_Store
