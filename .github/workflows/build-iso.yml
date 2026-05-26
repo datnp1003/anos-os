@@ -25,4 +25,8 @@ jobs:
       - name: Upload
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.ref_name }}" anos-os-linux-amd64.iso --clobber
+        run: |
+          gh release view "${{ github.ref_name }}" &>/dev/null || \
+            gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" \
+              --notes "AnosOS ISO (Anos Core ${{ inputs.anos_version || 'v0.11.0' }}) — auto-built by CI"
+          gh release upload "${{ github.ref_name }}" anos-os-linux-amd64.iso --clobber
