@@ -241,7 +241,7 @@ if [ "$(tty)" = "/dev/tty1" ] && [ "$(whoami)" = "anos" ]; then
     clear 2>/dev/null || true
     echo "╔══════════════════════════════════════════════╗"
     echo "║       🦾 AnosOS — AI Native OS              ║"
-    echo "║          v0.11.0 — Connected               ║"
+    echo "║          v1.0.1 — Connected               ║"
     echo "╚══════════════════════════════════════════════╝"
     echo ""
     if $ANOS_READY; then
@@ -256,7 +256,7 @@ fi
 
 # Other ttys: admin shell
 echo ""
-echo "🦾 AnosOS v0.11.0"
+echo "🦾 AnosOS v1.0.1"
 echo "─────────────────────"
 $ANOS_READY && echo " AI daemon:  ✅ Online" || echo " AI daemon:  ❌ Offline"
 echo " Type 'anos-cli' for AI shell   |   'exit' to log out"
@@ -268,7 +268,7 @@ cat > "$ROOTFS/etc/issue" << 'ISSUE'
 
 ╔══════════════════════════════════════════════╗
 ║       🦾 AnosOS — AI Native OS              ║
-║          v0.11.0 — \l                          ║
+║          v1.0.1 — \l                          ║
 ║──────────────────────────────────────────────║
 ║   Default: anos / anos                      ║
 ║   ⚠️  CHANGE PASSWORD on first login!       ║

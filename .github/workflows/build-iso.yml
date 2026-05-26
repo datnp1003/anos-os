@@ -2,7 +2,7 @@ name: Build AnosOS ISO (x86_64)
 
 on:
   push:
-    tags: ['os-v*']
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       anos_version:
@@ -10,7 +10,7 @@ on:
         required: true
         type: string
       tag:
-        description: 'Release tag for this ISO, e.g. os-v0.11.0'
+        description: 'Release tag for this ISO, e.g. v1.0.1'
         required: true
         type: string
 
@@ -155,7 +155,7 @@ if [ "$(tty)" = "/dev/tty1" ] && [ "$(whoami)" = "anos" ]; then
     if $ANOS_READY; then exec /usr/bin/anos-cli; fi
     echo "⚠️  Daemon not ready"; exec /bin/sh
 fi
-echo "🦾 AnosOS v0.11.0"
+echo "🦾 AnosOS v1.0.1"
 $ANOS_READY && echo " AI: ✅ Online" || echo " AI: ❌ Offline"
 echo " Type 'anos-cli' for AI shell"
 PROFILE

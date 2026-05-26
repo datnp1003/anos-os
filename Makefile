@@ -1,6 +1,7 @@
 .PHONY: all iso docker clean
 
 ANOS_VERSION ?= v0.11.0
+OS_VERSION ?= v1.0.1
 ISO_OUTPUT ?= anos-os-linux-amd64.iso
 
 all: iso

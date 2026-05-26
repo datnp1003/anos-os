@@ -106,7 +106,7 @@ anos-os/
 | Repo | Scope | Release |
 |------|-------|---------|
 | `datnp1003/anos` | CLI + Daemon + Skills | `v0.11.0` |
-| `datnp1003/anos-os` | Kernel + Init + ISO + Docker | `os-v0.11.0` |
+| `datnp1003/anos-os` | Kernel + Init + ISO + Docker | `v1.0.1` |
 
 AnosOS **pins** a specific `anos` release version. ISO build pulls binaries from:
 ```

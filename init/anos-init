@@ -17,7 +17,7 @@ NC='\033[0m'
 echo ""
 echo "╔══════════════════════════════════════════════╗"
 echo "║       🦾 AnosOS — AI Native OS              ║"
-echo "║          v0.11.0 — booting...               ║"
+echo "║          v1.0.1 — booting...               ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
@@ -89,7 +89,7 @@ clear 2>/dev/null || printf "\033[2J\033[H"
 echo ""
 echo "╔══════════════════════════════════════════════╗"
 echo "║       🦾 AnosOS — AI Native OS              ║"
-echo "║          v0.11.0 — Ready                    ║"
+echo "║          v1.0.1 — Ready                    ║"
 echo "╠══════════════════════════════════════════════╣"
 if $NET_ONLINE; then
     echo "║  🌐 Network: Online                         ║"
