@@ -350,6 +350,11 @@ grub-mkrescue -o "$OUTPUT" "$ROOTFS" \
     --fonts="" \
     2>&1 | grep -v "^xorriso\|^GNU\|^Disk\|^libisofs" || true
 
+if [ ! -f "$OUTPUT" ]; then
+    echo "  Falling back to genisoimage..."
+    genisoimage -R -r -J -V "$ISO_LABEL" -o "$OUTPUT" -b boot/grub/grub.cfg -no-emul-boot "$ROOTFS" 2>&1 || true
+fi
+
 # ── 12. Show result ──
 echo ""
 echo "✅ ISO built successfully!"
