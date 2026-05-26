@@ -77,32 +77,15 @@ else
     }
 fi
 
-# Download assets (source tarball for skills + prompt + init)
-ASSET_URL=$(curl -s "https://api.github.com/repos/datnp1003/anos/releases/tags/$ANOS_VERSION" 2>/dev/null \
-    | grep '"browser_download_url"' | grep 'tar.gz' | head -1 | sed 's/.*"browser_download_url": "\(.*\)".*/\1/')
-
-if [ -n "$ASSET_URL" ]; then
-    echo "  Downloading source assets..."
-    curl -fsSL "$ASSET_URL" -o "$DOWNLOAD_DIR/source.tar.gz" 2>/dev/null || {
-        echo "  ⚠️ Cannot download source — trying git clone shallow..."
-        ASSET_URL=""
-    }
+# Download assets via git shallow clone (most reliable)
+echo "  Downloading skills & prompt..."
+if command -v git &>/dev/null; then
+    git clone --depth 1 --branch "$ANOS_VERSION" "$ANOS_REPO.git" "$DOWNLOAD_DIR/repo" 2>/dev/null || \
+    git clone --depth 1 "$ANOS_REPO.git" "$DOWNLOAD_DIR/repo" 2>/dev/null || true
 fi
-
-if [ -z "$ASSET_URL" ]; then
-    # Fallback: clone shallow and extract skills + prompt
-    if command -v git &>/dev/null; then
-        echo "  Cloning anos $ANOS_VERSION (shallow)..."
-        git clone --depth 1 --branch "$ANOS_VERSION" "$ANOS_REPO.git" "$DOWNLOAD_DIR/repo" 2>/dev/null || \
-        git clone --depth 1 "$ANOS_REPO.git" "$DOWNLOAD_DIR/repo" 2>/dev/null || true
-        if [ -d "$DOWNLOAD_DIR/repo" ]; then
-            cp "$DOWNLOAD_DIR/repo/ANOS-SYSTEM-PROMPT.md" "$DOWNLOAD_DIR/" 2>/dev/null || true
-            cp -r "$DOWNLOAD_DIR/repo/skills" "$DOWNLOAD_DIR/" 2>/dev/null || true
-            cp "$DOWNLOAD_DIR/repo/anos-init" "$DOWNLOAD_DIR/" 2>/dev/null || true
-        fi
-    fi
-else
-    tar xzf "$DOWNLOAD_DIR/source.tar.gz" -C "$DOWNLOAD_DIR/" --strip-components=1
+if [ -d "$DOWNLOAD_DIR/repo" ]; then
+    cp "$DOWNLOAD_DIR/repo/ANOS-SYSTEM-PROMPT.md" "$DOWNLOAD_DIR/" 2>/dev/null || true
+    cp -r "$DOWNLOAD_DIR/repo/skills" "$DOWNLOAD_DIR/" 2>/dev/null || true
 fi
 
 # Copy to rootfs
@@ -119,9 +102,11 @@ chmod +x "$ROOTFS/sbin/init"
 # Cleanup download dir
 rm -rf "$DOWNLOAD_DIR"
 
-# ── 3. Copy busybox + create symlinks ──
+# ── 3. Download busybox + create symlinks ──
 echo "📦 Setting up busybox..."
-# Prefer busybox-static for login utils (getty, login, passwd, su)
+# Download busybox-static from Alpine (no sudo needed)
+BUSYBOX_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/${BINARY_ARCH}/busybox-static-1.37.0-r12.apk"
+
 if command -v busybox-static &>/dev/null; then
     cp "$(command -v busybox-static)" "$ROOTFS/bin/busybox"
 elif [ -f /bin/busybox-static ]; then
@@ -133,8 +118,28 @@ elif command -v busybox &>/dev/null; then
 elif [ -f /bin/busybox ]; then
     cp /bin/busybox "$ROOTFS/bin/busybox"
 else
-    echo "❌ busybox not found! Install busybox-static package."
-    exit 1
+    # Download busybox-static from Alpine (no sudo needed, ~2MB)
+    echo "  Downloading busybox-static from Alpine..."
+    BB_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/${BINARY_ARCH}/busybox-static-1.37.0-r12.apk"
+    if curl -fsSL "$BB_URL" -o /tmp/busybox.apk 2>/dev/null; then
+        # Extract APK (it's a tar.gz with 3 headers)
+        tar xzf /tmp/busybox.apk -C /tmp/ 2>/dev/null || true
+        if [ -f /tmp/bin/busybox.static ]; then
+            cp /tmp/bin/busybox.static "$ROOTFS/bin/busybox"
+        elif [ -f /tmp/busybox.static ]; then
+            cp /tmp/busybox.static "$ROOTFS/bin/busybox"
+        else
+            # Fallback: try direct binary download
+            curl -fsSL "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox" -o "$ROOTFS/bin/busybox" 2>/dev/null || {
+                echo "❌ Cannot get busybox. Install: sudo apt install busybox-static"
+                exit 1
+            }
+        fi
+        rm -rf /tmp/busybox.apk /tmp/bin /tmp/.\SIGN.* 2>/dev/null || true
+    else
+        echo "❌ Cannot download busybox. Install: sudo apt install busybox-static"
+        exit 1
+    fi
 fi
 chmod +x "$ROOTFS/bin/busybox"
 
@@ -303,14 +308,30 @@ GRUB
 
 # ── 9. Copy kernel ──
 echo "🐧 Copying kernel..."
-if [ -f /boot/vmlinuz ]; then
-    cp /boot/vmlinuz "$ROOTFS/boot/vmlinuz"
-elif [ -f /vmlinuz ]; then
-    cp /vmlinuz "$ROOTFS/boot/vmlinuz"
-else
-    KERNEL=$(ls /boot/vmlinuz-* 2>/dev/null | head -1)
-    [ -n "$KERNEL" ] && cp "$KERNEL" "$ROOTFS/boot/vmlinuz"
+KERNEL=""
+for k in /boot/vmlinuz /vmlinuz /boot/vmlinuz-*; do
+    if [ -f "$k" ]; then
+        KERNEL="$k"
+        break
+    fi
+done
+if [ -z "$KERNEL" ]; then
+    echo "  ❌ No kernel found in /boot"
+    exit 1
 fi
+if [ -r "$KERNEL" ]; then
+    cp "$KERNEL" "$ROOTFS/boot/vmlinuz"
+else
+    echo "  Kernel requires sudo to read. Trying..."
+    if command -v sudo &>/dev/null; then
+        sudo cp "$KERNEL" "$ROOTFS/boot/vmlinuz"
+        sudo chmod 644 "$ROOTFS/boot/vmlinuz"
+    else
+        echo "  ❌ Cannot read kernel. Run with: sudo bash iso/build-iso.sh $OUTPUT $ARCH $ANOS_VERSION"
+        exit 1
+    fi
+fi
+echo "  Kernel: $(basename $KERNEL)"
 
 # ── 10. Create initrd from rootfs ──
 echo "📦 Creating squashfs from rootfs..."
