@@ -1,0 +1,138 @@
+#!/bin/sh
+# 🦾 AnosOS — Initrd Init (Stage 1)
+# Runs inside initramfs. Mounts squashfs root + overlay, then switch_root.
+set -e
+
+echo ""
+echo "🦾 AnosOS Initrd — Stage 1"
+
+# ── 1. Mount early filesystems ──
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts
+
+# ── 2. Load essential kernel modules ──
+# Busybox modprobe may not handle dependencies well, use insmod directly
+if [ -d /lib/modules ]; then
+    KVER=$(ls /lib/modules/ | head -1)
+    MODDIR="/lib/modules/$KVER/kernel/drivers"
+    
+    # Storage drivers (critical — without these, no disk access)
+    for mod in \
+        ata_piix ahci libahci \
+        virtio_blk virtio_scsi virtio_pci \
+        nvme nvme_core \
+        sd_mod sr_mod usb_storage uas \
+        loop squashfs overlay; do
+        find "$MODDIR" -name "${mod}.ko*" -exec insmod {} \; 2>/dev/null || true
+    done
+    
+    # Filesystem drivers
+    for mod in ext4 ext3 ext2 vfat msdos isofs xfs btrfs; do
+        find "$MODDIR" -name "${mod}.ko*" -exec insmod {} \; 2>/dev/null || true
+    done
+    
+    # Network drivers (common NICs)
+    for mod in e1000 e1000e r8169 virtio_net tg3 igb ixgbe; do
+        find "$MODDIR" -name "${mod}.ko*" -exec insmod {} \; 2>/dev/null || true
+    done
+fi
+
+# ── 3. Wait for storage devices ──
+echo "⏳ Waiting for storage devices..."
+sleep 1
+
+# Rescan PCI to detect all storage
+echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
+
+# ── 4. Find and mount the squashfs ──
+echo "🔍 Locating AnosOS rootfs..."
+SQUASHFS=""
+ROOT_DEV=""
+
+# Try to find the ISO/CD boot device
+for dev in /dev/sr0 /dev/sr1 /dev/cdrom; do
+    if [ -b "$dev" ]; then
+        mkdir -p /cdrom
+        if mount -t iso9660 -o ro "$dev" /cdrom 2>/dev/null; then
+            if [ -f /cdrom/anos.squashfs ]; then
+                SQUASHFS="/cdrom/anos.squashfs"
+                echo "  ✅ Found on $dev"
+                break
+            fi
+            umount /cdrom 2>/dev/null || true
+        fi
+    fi
+done
+
+# Try USB / other block devices
+if [ -z "$SQUASHFS" ]; then
+    for dev in /dev/sd* /dev/vd* /dev/nvme*; do
+        [ -b "$dev" ] || continue
+        # Skip partitions, try whole disks
+        case "$dev" in
+            *[0-9]) continue ;;
+        esac
+        mkdir -p /cdrom
+        if mount -t iso9660 -o ro "$dev" /cdrom 2>/dev/null; then
+            if [ -f /cdrom/anos.squashfs ]; then
+                SQUASHFS="/cdrom/anos.squashfs"
+                echo "  ✅ Found on $dev"
+                break
+            fi
+            umount /cdrom 2>/dev/null || true
+        fi
+    done
+fi
+
+# Last resort: embedded in initrd itself
+if [ -z "$SQUASHFS" ] && [ -f /anos.squashfs ]; then
+    SQUASHFS="/anos.squashfs"
+    echo "  Using embedded squashfs"
+fi
+
+if [ -z "$SQUASHFS" ]; then
+    echo ""
+    echo "❌ ERROR: Cannot find AnosOS rootfs (anos.squashfs)"
+    echo "   Boot device not found or squashfs missing."
+    echo ""
+    echo "   Dropping to emergency shell..."
+    exec /bin/sh
+fi
+
+# ── 5. Mount root (squashfs + overlay for writable) ──
+echo "📦 Mounting root filesystem..."
+mkdir -p /newroot /lower /upper /work
+
+# Mount squashfs read-only lower layer
+mount -t squashfs -o ro,loop "$SQUASHFS" /lower
+
+# Create tmpfs upper/work for overlay
+mount -t tmpfs tmpfs /upper -o size=512M
+
+mkdir -p /upper/upper /upper/work
+
+# Mount overlay
+mount -t overlay overlay -o lowerdir=/lower,upperdir=/upper/upper,workdir=/upper/work /newroot
+
+# ── 6. Move mount points to new root ──
+echo "🔄 Switching to new root..."
+mount --move /proc /newroot/proc
+mount --move /sys /newroot/sys
+mount --move /dev /newroot/dev
+mount --move /upper /newroot/overlay 2>/dev/null || true
+
+# ── 7. Try to mount CD/USB into new root for installer ──
+if mountpoint -q /cdrom 2>/dev/null; then
+    mkdir -p /newroot/media/cdrom
+    mount --move /cdrom /newroot/media/cdrom 2>/dev/null || true
+fi
+
+# ── 8. Switch root ──
+echo "🚀 Booting AnosOS..."
+exec switch_root /newroot /sbin/init "$@"
+
+# Should never reach here
+exec /bin/sh

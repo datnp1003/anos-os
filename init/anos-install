@@ -1,0 +1,347 @@
+#!/bin/sh
+# 🦾 AnosOS Installer — Install to hard disk
+# Usage: anos-install [--disk /dev/sda] [--auto]
+#
+# Interactive by default, or --auto with --disk for unattended
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+ANOS_VERSION="${ANOS_VERSION:-v1.0.1}"
+AUTO=false
+TARGET_DISK=""
+
+banner() {
+    clear 2>/dev/null || printf "\033[2J\033[H"
+    echo ""
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║       🦾 AnosOS Installer v${ANOS_VERSION}           ║"
+    echo "║       AI Native Operating System             ║"
+    echo "╚══════════════════════════════════════════════╝"
+    echo ""
+}
+
+# ── Argument parsing ──
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --disk)  TARGET_DISK="$2"; shift ;;
+        --auto)  AUTO=true ;;
+        *)       echo "Unknown: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+# ── 1. Disk Detection & Selection ──
+list_disks() {
+    echo "  ${BOLD}Available disks:${NC}"
+    echo ""
+    printf "  %-16s %-12s %-10s %s\n" "DEVICE" "SIZE" "TYPE" "MODEL"
+    printf "  %-16s %-12s %-10s %s\n" "------" "----" "----" "-----"
+    
+    for d in /dev/sd? /dev/vd? /dev/nvme?n1 /dev/mmcblk?; do
+        [ -b "$d" ] || continue
+        SIZE=$(cat "/sys/class/block/${d##*/}/size" 2>/dev/null | awk '{printf "%.1fG", $1*512/1024/1024/1024}')
+        TYPE=""
+        ROTA=$(cat "/sys/class/block/${d##*/}/queue/rotational" 2>/dev/null)
+        [ "$ROTA" = "0" ] && TYPE="SSD" || TYPE="HDD"
+        MODEL=$(cat "/sys/class/block/${d##*/}/device/model" 2>/dev/null | tr -d '\n' | xargs)
+        printf "  %-16s %-12s %-10s %s\n" "$d" "${SIZE:-?}" "$TYPE" "${MODEL:-Unknown}"
+    done
+    echo ""
+}
+
+if [ -n "$TARGET_DISK" ]; then
+    # Already specified
+    if [ ! -b "$TARGET_DISK" ]; then
+        echo "${RED}❌ Error: $TARGET_DISK does not exist or is not a block device${NC}"
+        exit 1
+    fi
+else
+    banner
+    list_disks
+    
+    echo "  ${YELLOW}⚠️  WARNING: Installing will ERASE ALL DATA on the selected disk!${NC}"
+    echo ""
+    printf "  Enter disk to install to (e.g. /dev/sda) or 'q' to quit: "
+    read -r TARGET_DISK
+    
+    [ "$TARGET_DISK" = "q" ] || [ "$TARGET_DISK" = "Q" ] && exit 0
+    
+    if [ ! -b "$TARGET_DISK" ]; then
+        echo "${RED}❌ $TARGET_DISK is not a valid block device${NC}"
+        exit 1
+    fi
+fi
+
+# ── 2. Confirm ──
+banner
+echo "  ${BOLD}Installation target:${NC}"
+echo "    Disk:      ${YELLOW}$TARGET_DISK${NC}"
+echo ""
+echo "  ${BOLD}This will:${NC}"
+echo "    1. Create partition table (GPT)"
+echo "    2. Create EFI partition (512M) + Root partition (rest)"
+echo "    3. Format as FAT32 + ext4"
+echo "    4. Copy AnosOS system files"
+echo "    5. Install bootloader (GRUB)"
+echo ""
+echo "  ${RED}⚠️  ALL DATA ON $TARGET_DISK WILL BE DESTROYED!${NC}"
+echo ""
+
+if [ "$AUTO" != "true" ]; then
+    printf "  Type 'YES' (uppercase) to continue: "
+    read -r CONFIRM
+    [ "$CONFIRM" != "YES" ] && echo "  Canceled." && exit 0
+fi
+
+# ── 3. Partitioning ──
+echo ""
+echo "${CYAN}📀 Partitioning $TARGET_DISK...${NC}"
+
+# Wipe existing partition table and create GPT
+dd if=/dev/zero of="$TARGET_DISK" bs=1M count=10 2>/dev/null
+parted -s "$TARGET_DISK" mklabel gpt
+
+# Create partitions
+# P1: EFI System Partition (512M)
+# P2: Root partition (rest)
+PART_PREFIX="${TARGET_DISK}"
+# Handle NVMe devices (/dev/nvme0n1 → /dev/nvme0n1p1)
+case "$TARGET_DISK" in
+    *nvme*|*mmcblk*) PART_PREFIX="${TARGET_DISK}p" ;;
+esac
+
+EFI_PART="${PART_PREFIX}1"
+ROOT_PART="${PART_PREFIX}2"
+
+parted -s "$TARGET_DISK" mkpart primary fat32 1MiB 513MiB
+parted -s "$TARGET_DISK" set 1 esp on
+parted -s "$TARGET_DISK" set 1 boot on
+parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 100%
+
+# Wait for kernel to re-read partition table
+partprobe "$TARGET_DISK" 2>/dev/null || udevadm settle 2>/dev/null || sleep 2
+
+echo "  ✅ Partitions created:"
+echo "     EFI:  $EFI_PART (512M FAT32)"
+echo "     Root: $ROOT_PART (ext4)"
+
+# ── 4. Format ──
+echo ""
+echo "${CYAN}💾 Formatting...${NC}"
+mkfs.fat -F32 "$EFI_PART" -n ANOS_EFI 2>&1 | grep -v "^mkfs.fat" || true
+mkfs.ext4 -F -q "$ROOT_PART" -L ANOS_ROOT 2>&1 || true
+echo "  ✅ Formatted: FAT32 + ext4"
+
+# ── 5. Mount target ──
+echo ""
+echo "${CYAN}📂 Mounting target...${NC}"
+mkdir -p /mnt/target
+mount -t ext4 "$ROOT_PART" /mnt/target
+mkdir -p /mnt/target/boot/efi
+mount -t vfat "$EFI_PART" /mnt/target/boot/efi
+echo "  ✅ Mounted at /mnt/target"
+
+# ── 6. Copy system files ──
+echo ""
+echo "${CYAN}📋 Copying system files...${NC}"
+
+# Method A: Copy from live system (running from overlay)
+copy_from_live() {
+    # Exclude virtual filesystems and mount points
+    echo "  Copying from live system..."
+    for dir in bin sbin usr etc home opt lib; do
+        [ -d "/$dir" ] && cp -a "/$dir" "/mnt/target/" 2>/dev/null
+    done
+    mkdir -p /mnt/target/{dev,proc,sys,run,tmp,mnt,boot,var,media,overlay,root}
+}
+
+# Method B: Extract from squashfs (if CD available)
+copy_from_cd() {
+    if [ -f /media/cdrom/anos.squashfs ]; then
+        echo "  Extracting from squashfs..."
+        mkdir -p /tmp/root-extract
+        mount -t squashfs -o ro,loop /media/cdrom/anos.squashfs /tmp/root-extract 2>/dev/null || return 1
+        cp -a /tmp/root-extract/* /mnt/target/ 2>/dev/null
+        umount /tmp/root-extract 2>/dev/null || true
+        return 0
+    fi
+    return 1
+}
+
+# Try CD copy first (cleaner), fall back to live
+if ! copy_from_cd; then
+    copy_from_live
+fi
+
+# Ensure critical directories exist
+mkdir -p /mnt/target/{dev,proc,sys,run,tmp,mnt,boot/grub,var/log,root}
+
+# Copy kernel + initrd from CD or live system
+if [ -f /media/cdrom/boot/vmlinuz ] && [ -f /media/cdrom/boot/initrd.img ]; then
+    cp /media/cdrom/boot/vmlinuz /mnt/target/boot/vmlinuz
+    cp /media/cdrom/boot/initrd.img /mnt/target/boot/initrd.img
+elif [ -f /boot/vmlinuz ] && [ -f /boot/initrd.img ]; then
+    cp /boot/vmlinuz /mnt/target/boot/vmlinuz
+    cp /boot/initrd.img /mnt/target/boot/initrd.img
+else
+    echo "  ${YELLOW}⚠️  No kernel found to copy — bootloader may not work${NC}"
+fi
+
+# ── 7. Create fstab ──
+echo "${CYAN}📝 Creating /etc/fstab...${NC}"
+cat > /mnt/target/etc/fstab << FSTAB
+# AnosOS — /etc/fstab
+# <device>    <mount>         <type>  <opts>      <dump> <pass>
+UUID=$(blkid -s UUID -o value "$ROOT_PART" 2>/dev/null)  /        ext4    defaults,noatime  0  1
+UUID=$(blkid -s UUID -o value "$EFI_PART" 2>/dev/null)   /boot/efi vfat  defaults,noatime  0  2
+tmpfs         /tmp             tmpfs   defaults    0  0
+FSTAB
+echo "  ✅ fstab created"
+
+# ── 8. Install Bootloader (GRUB) ──
+echo ""
+echo "${CYAN}🖥️ Installing GRUB bootloader...${NC}"
+
+# Detect boot mode: UEFI or BIOS
+BOOT_MODE="uefi"
+if [ ! -d /sys/firmware/efi ]; then
+    BOOT_MODE="bios"
+    echo "  Detected: BIOS (Legacy) boot"
+else
+    echo "  Detected: UEFI boot"
+fi
+
+if [ "$BOOT_MODE" = "uefi" ]; then
+    # UEFI install
+    if command -v grub-install &>/dev/null; then
+        grub-install \
+            --target=x86_64-efi \
+            --efi-directory=/mnt/target/boot/efi \
+            --boot-directory=/mnt/target/boot \
+            --bootloader-id=AnosOS \
+            --removable \
+            "$TARGET_DISK" 2>&1 || {
+            # Fallback: try different EFI target
+            grub-install \
+                --target=i386-efi \
+                --efi-directory=/mnt/target/boot/efi \
+                --boot-directory=/mnt/target/boot \
+                --bootloader-id=AnosOS \
+                --removable \
+                "$TARGET_DISK" 2>&1 || true
+        }
+    else
+        echo "  ${YELLOW}⚠️ grub-install not available — skipping bootloader${NC}"
+    fi
+else
+    # BIOS/Legacy install
+    if command -v grub-install &>/dev/null; then
+        grub-install \
+            --target=i386-pc \
+            --boot-directory=/mnt/target/boot \
+            "$TARGET_DISK" 2>&1 || true
+    else
+        echo "  ${YELLOW}⚠️ grub-install not available — skipping bootloader${NC}"
+    fi
+fi
+
+# ── 9. Create GRUB config ──
+echo ""
+echo "${CYAN}📝 Generating GRUB config...${NC}"
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT_PART" 2>/dev/null || echo "/dev/sda2")
+
+cat > /mnt/target/boot/grub/grub.cfg << GRUBCFG
+set timeout=5
+set default=0
+loadfont unicode
+
+menuentry "🦾 AnosOS" {
+    search --no-floppy --fs-uuid --set=root ${ROOT_UUID}
+    linux /boot/vmlinuz root=UUID=${ROOT_UUID} ro console=tty1 quiet
+    initrd /boot/initrd.img
+}
+
+menuentry "AnosOS — Verbose" {
+    search --no-floppy --fs-uuid --set=root ${ROOT_UUID}
+    linux /boot/vmlinuz root=UUID=${ROOT_UUID} ro console=tty1
+    initrd /boot/initrd.img
+}
+
+menuentry "AnosOS — Recovery (root shell)" {
+    search --no-floppy --fs-uuid --set=root ${ROOT_UUID}
+    linux /boot/vmlinuz root=UUID=${ROOT_UUID} ro console=tty1 init=/bin/sh
+    initrd /boot/initrd.img
+}
+GRUBCFG
+echo "  ✅ GRUB config generated"
+
+# ── 10. Create /etc/issue for installed system ──
+cat > /mnt/target/etc/issue << 'ISSUE'
+
+╔══════════════════════════════════════════════╗
+║       🦾 AnosOS — AI Native OS               ║
+║          \l                                   ║
+║──────────────────────────────────────────────║
+║   Login: anos / anos                         ║
+║   ⚠️  CHANGE PASSWORD NOW!                  ║
+╚══════════════════════════════════════════════╝
+
+ISSUE
+
+# ── 11. Build initrd for installed system ──
+echo ""
+echo "${CYAN}📦 Regenerating initrd for installed system...${NC}"
+if command -v mkinitramfs &>/dev/null; then
+    mkinitramfs -o /mnt/target/boot/initrd.img 2>/dev/null || true
+elif command -v dracut &>/dev/null; then
+    dracut --force /mnt/target/boot/initrd.img 2>/dev/null || true
+fi
+
+# ── 12. Cleanup & Post-install ──
+echo ""
+echo "${CYAN}🧹 Finishing up...${NC}"
+
+# Set hostname
+echo "anos" > /mnt/target/etc/hostname 2>/dev/null || true
+
+# Ensure anos home dir permissions
+chown -R 1000:1000 /mnt/target/home/anos 2>/dev/null || true
+chmod 700 /mnt/target/home/anos 2>/dev/null || true
+
+# Sync
+sync
+umount /mnt/target/boot/efi 2>/dev/null || true
+umount /mnt/target 2>/dev/null || true
+
+echo ""
+echo "╔══════════════════════════════════════════════╗"
+echo "║       ✅ Installation Complete!             ║"
+echo "╠══════════════════════════════════════════════╣"
+echo "║                                              ║"
+echo "║   🦾 AnosOS installed to: $TARGET_DISK"
+echo "║                                              ║"
+echo "║   Login:  anos / anos                        ║"
+echo "║   Root:   root / root                        ║"
+echo "║                                              ║"
+echo "║   ⚠️  CHANGE ALL PASSWORDS on first boot!   ║"
+echo "║                                              ║"
+echo "║   Remove media and reboot.                   ║"
+echo "║                                              ║"
+echo "╚══════════════════════════════════════════════╝"
+echo ""
+
+# Ask to reboot
+if [ "$AUTO" != "true" ]; then
+    printf "  Reboot now? [y/N]: "
+    read -r REBOOT
+    case "$REBOOT" in
+        y|Y|yes|YES) reboot -f 2>/dev/null || echo "  Please reboot manually." ;;
+        *) echo "  Remove media and type 'reboot' when ready." ;;
+    esac
+fi

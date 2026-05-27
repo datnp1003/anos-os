@@ -18,15 +18,47 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends genisoimage squashfs-tools cpio python3 curl linux-image-generic busybox-static udhcpc xorriso
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            xorriso \
+            genisoimage \
+            squashfs-tools \
+            cpio \
+            python3 \
+            curl \
+            git \
+            linux-image-generic \
+            busybox-static \
+            udev \
+            udhcpc \
+            grub-pc-bin \
+            grub-efi-amd64-bin \
+            grub-efi-amd64-signed \
+            grub-common \
+            mtools \
+            dosfstools \
+            e2fsprogs \
+            parted
+
       - name: Build ISO
         run: bash iso/build-iso.sh anos-os-linux-amd64.iso amd64 "${{ inputs.anos_version || 'v0.11.0' }}"
-      - name: Upload
+
+      - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "${{ github.ref_name }}" &>/dev/null || \
-            gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" \
-              --notes "AnosOS ISO (Anos Core ${{ inputs.anos_version || 'v0.11.0' }}) — auto-built by CI"
+            gh release create "${{ github.ref_name }}" \
+              --title "${{ github.ref_name }}" \
+              --notes "AnosOS ISO (Anos Core ${{ inputs.anos_version || 'v0.11.0' }}) — auto-built by CI
+
+          🔧 Full-featured ISO:
+          - UEFI + BIOS dual boot
+          - Live system with overlayfs
+          - Multi-user login
+          - anos-install (disk partitioning + GRUB install)
+          - Kernel modules for real hardware"
           gh release upload "${{ github.ref_name }}" anos-os-linux-amd64.iso --clobber
