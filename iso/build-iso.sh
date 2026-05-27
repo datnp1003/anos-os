@@ -345,33 +345,35 @@ rm -rf "$INITRD"; mkdir -p "$INITRD"/{bin,sbin,lib/modules}
 cp "$(dirname "$0")/../init/initrd-init" "$INITRD/init"
 chmod +x "$INITRD/init"
 
-# Busybox in initrd (critical for early boot)
-# CRITICAL: copy busybox directly as /bin/sh and every cmd init uses
-# Symlinks in cpio/initramfs can fail silently → "Attempted to kill init!"
+# Busybox in initrd — ONLY ONE binary, create symlinks dynamically in /init
+# (Making 20 copies of 2MB busybox = 40MB initrd → kernel OOM → panic)
 cp "$ROOTFS/bin/busybox" "$INITRD/bin/busybox"
 chmod +x "$INITRD/bin/busybox"
+# /init uses busybox --install at runtime to create all symlinks
+# We ship ONLY busybox as /bin/sh for the shebang, the rest are runtime
 
-# Direct copies (not symlinks!) for every command /init uses
-for u in sh mount umount cat ls echo mkdir sleep grep find mknod cp ln dd sync reboot; do
-    cp "$ROOTFS/bin/busybox" "$INITRD/bin/$u"
-done
-cp "$ROOTFS/bin/busybox" "$INITRD/sbin/switch_root"
-
-# Extra symlinks for less critical commands (ok to fail)
-for u in insmod modprobe rmmod chroot; do
-    ln -sf /bin/busybox "$INITRD/bin/$u" 2>/dev/null || cp "$ROOTFS/bin/busybox" "$INITRD/bin/$u"
-done
-
-# Kernel modules (so storage/FS drivers available before root is mounted)
+# Kernel modules — copy ONLY storage drivers (keep initrd small)
 if [ -d /lib/modules ]; then
     KVER=$(ls /lib/modules/ | head -1)
-    cp -r "/lib/modules/$KVER" "$INITRD/lib/modules/" 2>/dev/null || true
+    MOD_OUT="$INITRD/lib/modules/$KVER/kernel/drivers"
+    mkdir -p "$MOD_OUT"
+    for cat in ata nvme virtio scsi "usb/storage"; do
+        mkdir -p "$MOD_OUT/$cat"
+        find "/lib/modules/$KVER/kernel/drivers/$cat" -name "*.ko*" \
+            -exec cp {} "$MOD_OUT/$cat/" \; 2>/dev/null || true
+    done
+    find "/lib/modules/$KVER/kernel" -name "loop.ko*" -exec cp {} "$INITRD/lib/modules/$KVER/" \; 2>/dev/null || true
+    find "/lib/modules/$KVER/kernel" -name "squashfs.ko*" -exec cp {} "$INITRD/lib/modules/$KVER/" \; 2>/dev/null || true
+    find "/lib/modules/$KVER/kernel" -name "overlay.ko*" -exec cp {} "$INITRD/lib/modules/$KVER/" \; 2>/dev/null || true
 fi
 
-# Embed squashfs into initrd
-cp /tmp/anos-root.squashfs "$INITRD/anos.squashfs"
+# DON'T embed squashfs — keeps initrd under 10MB, mount from CD/USB at runtime
+# Instead, build initrd (cpio) and put squashfs separately on ISO
 (cd "$INITRD" && find . | cpio -o -H newc) > /tmp/initrd.img
 cp /tmp/initrd.img "$ROOTFS/boot/initrd.img"
+
+# Copy squashfs to ISO root so /init can find it on CD/USB
+cp /tmp/anos-root.squashfs "$ROOTFS/anos.squashfs"
 
 # ── 11. Build ISO ──
 echo "💿 Building ISO..."
