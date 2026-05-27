@@ -333,35 +333,14 @@ else
 fi
 echo "  Kernel: $(basename $KERNEL)"
 
-# ── 10. Create initrd (with /init script + busybox + modules + squashfs) ──
+# ── 10. Create initrd from rootfs ──
 echo "📦 Creating squashfs from rootfs..."
 mksquashfs "$ROOTFS" /tmp/anos-root.squashfs -comp xz -noappend -quiet
 
-echo "📦 Building initrd..."
-INITRD="/tmp/initrd-root"
-rm -rf "$INITRD"; mkdir -p "$INITRD"/{bin,sbin,lib/modules}
-
-# /init script (Stage 1: mount squashfs -> switch_root)
-cp "$(dirname "$0")/../init/initrd-init" "$INITRD/init"
-chmod +x "$INITRD/init"
-
-# Busybox in initrd (critical for early boot)
-cp "$ROOTFS/bin/busybox" "$INITRD/bin/busybox"
-chmod +x "$INITRD/bin/busybox"
-for u in sh mount umount cat ls echo mkdir sleep insmod modprobe rmmod find grep mknod switch_root chroot cp ln dd sync reboot; do
-    ln -sf /bin/busybox "$INITRD/bin/$u" 2>/dev/null || true
-done
-ln -sf /bin/busybox "$INITRD/sbin/switch_root" 2>/dev/null || true
-
-# Kernel modules (so storage/FS drivers available before root is mounted)
-if [ -d /lib/modules ]; then
-    KVER=$(ls /lib/modules/ | head -1)
-    cp -r "/lib/modules/$KVER" "$INITRD/lib/modules/" 2>/dev/null || true
-fi
-
-# Embed squashfs into initrd
-cp /tmp/anos-root.squashfs "$INITRD/anos.squashfs"
-(cd "$INITRD" && find . | cpio -o -H newc) > /tmp/initrd.img
+# Create initrd (just squashfs → cpio)
+mkdir -p /tmp/initrd-root
+cp /tmp/anos-root.squashfs /tmp/initrd-root/anos.squashfs
+(cd /tmp/initrd-root && find . | cpio -o -H newc) > /tmp/initrd.img
 cp /tmp/initrd.img "$ROOTFS/boot/initrd.img"
 
 # ── 11. Build ISO ──
