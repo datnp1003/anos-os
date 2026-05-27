@@ -196,7 +196,7 @@ if [ "$(tty)" = "/dev/tty1" ]; then
   echo ""
 fi
 EOF
-sudo chown "$DEFAULT_USER:$DEFAULT_USER" "$ROOTFS/home/$DEFAULT_USER/.bash_profile"
+run_chroot "chown $DEFAULT_USER:$DEFAULT_USER /home/$DEFAULT_USER/.bash_profile"
 
 log "[8/9] Cleanup + generate initramfs"
 run_chroot "apt-get clean"
