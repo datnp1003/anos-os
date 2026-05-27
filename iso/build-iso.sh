@@ -1,266 +1,303 @@
-#!/bin/bash
-# 🦾 AnosOS ISO Builder v2
-# Approach: ISO9660 as rootfs (kernel mounts CD directly - no initrd/squashfs needed)
-# Based on working v1.0.1, adding: kernel modules, init scripts, GRUB config
+#!/usr/bin/env bash
+# 🦾 AnosOS ISO Builder — Standard Linux Distro Build Process
+# Base: Ubuntu Jammy (22.04) via debootstrap
+# Output: BIOS+UEFI bootable live ISO with SquashFS + standard initramfs
 set -euo pipefail
 
 OUTPUT="${1:-anos-os-linux-amd64.iso}"
 ARCH="${2:-amd64}"
-ANOS_VERSION="${3:-}"
-ROOTFS="/tmp/anos-rootfs"
-ISO_LABEL="ANOS_OS"
-ANOS_REPO="https://github.com/datnp1003/anos"
-BINARY_ARCH="$ARCH"; [ "$ARCH" = "amd64" ] && BINARY_ARCH="x86_64"
+ANOS_VERSION="${3:-v0.11.0}"
 
-get_latest_version() {
-    curl -s "https://api.github.com/repos/datnp1003/anos/releases/latest" 2>/dev/null \
-        | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": "\(.*\)".*/\1/' || echo "v0.11.0"
+DISTRO="jammy"
+MIRROR="http://archive.ubuntu.com/ubuntu/"
+WORK="/tmp/anos-build"
+ROOTFS="$WORK/rootfs"
+ISO="$WORK/iso"
+SQUASHFS="$ISO/casper/filesystem.squashfs"
+ANOS_REPO="https://github.com/datnp1003/anos"
+BINARY_ARCH="x86_64"
+[ "$ARCH" = "arm64" ] && BINARY_ARCH="arm64"
+
+LABEL="ANOS_OS"
+HOSTNAME="anos"
+DEFAULT_USER="anos"
+DEFAULT_PASS="anos"
+ROOT_PASS="root"
+
+log() { echo -e "\n\033[1;36m$*\033[0m"; }
+run_chroot() { sudo chroot "$ROOTFS" /bin/bash -lc "$*"; }
+
+cleanup_mounts() {
+  set +e
+  for m in dev/pts dev proc sys run; do
+    sudo umount -lf "$ROOTFS/$m" 2>/dev/null || true
+  done
+}
+trap cleanup_mounts EXIT
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || { echo "❌ Missing: $1"; exit 1; }
 }
 
-if [ -z "$ANOS_VERSION" ]; then
-    ANOS_VERSION=$(get_latest_version)
-    echo "🦾 Auto-detected Anos: $ANOS_VERSION"
-fi
+log "🦾 AnosOS ISO Builder"
+echo "  Base: Ubuntu $DISTRO"
+echo "  Anos: $ANOS_VERSION"
+echo "  Arch: $ARCH ($BINARY_ARCH)"
+echo "  Output: $OUTPUT"
 
-echo "🦾 AnosOS ISO Builder v2"
-echo "  Anos: $ANOS_VERSION  Arch: $ARCH  Output: $OUTPUT"
-echo ""
-
-rm -rf "$ROOTFS"
-mkdir -p "$ROOTFS"/{bin,sbin,boot,dev,etc,home/anos,opt/anos/{config,skills},proc,run,sys,tmp,usr/bin,var/log,media,mnt,root}
-
-DOWNLOAD_DIR="/tmp/anos-dl-$$"; mkdir -p "$DOWNLOAD_DIR"
-
-# ── 1. Anos binaries ──
-echo "📦 [1/5] Downloading Anos $ANOS_VERSION..."
-DL_BASE="$ANOS_REPO/releases/download/$ANOS_VERSION"
-curl -fsSL "$DL_BASE/anosd-linux-$BINARY_ARCH" -o "$DOWNLOAD_DIR/anosd" || curl -fsSL "$DL_BASE/anosd" -o "$DOWNLOAD_DIR/anosd"
-curl -fsSL "$DL_BASE/anos-cli-linux-$BINARY_ARCH" -o "$DOWNLOAD_DIR/anos-cli" || curl -fsSL "$DL_BASE/anos-cli" -o "$DOWNLOAD_DIR/anos-cli"
-chmod +x "$DOWNLOAD_DIR/anosd" "$DOWNLOAD_DIR/anos-cli"
-cp "$DOWNLOAD_DIR/anosd" "$ROOTFS/usr/bin/"
-cp "$DOWNLOAD_DIR/anos-cli" "$ROOTFS/usr/bin/"
-
-# Skills + prompt
-git clone --depth 1 "$ANOS_REPO.git" "$DOWNLOAD_DIR/repo" 2>/dev/null || true
-if [ -d "$DOWNLOAD_DIR/repo" ]; then
-    cp "$DOWNLOAD_DIR/repo/ANOS-SYSTEM-PROMPT.md" "$ROOTFS/opt/anos/" 2>/dev/null || true
-    cp -r "$DOWNLOAD_DIR/repo/skills"/* "$ROOTFS/opt/anos/skills/" 2>/dev/null || true
-fi
-
-# ── 2. Busybox ──
-echo "📦 [2/5] Busybox..."
-BB=""
-for try in /bin/busybox-static /usr/bin/busybox-static /bin/busybox "$(command -v busybox 2>/dev/null)"; do
-    [ -n "$try" ] && [ -f "$try" ] && BB="$try" && break
-done
-if [ -z "$BB" ]; then
-    BB_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/${BINARY_ARCH}/busybox-static-1.37.0-r12.apk"
-    curl -fsSL "$BB_URL" -o /tmp/bb.apk 2>/dev/null && tar xzf /tmp/bb.apk -C /tmp/ 2>/dev/null || true
-    for f in /tmp/bin/busybox.static /tmp/busybox.static; do
-        [ -f "$f" ] && cp "$f" "$ROOTFS/bin/busybox" && break
-    done
-    rm -rf /tmp/bb.apk /tmp/bin 2>/dev/null || true
-    [ ! -f "$ROOTFS/bin/busybox" ] && {
-        curl -fsSL "https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox" -o "$ROOTFS/bin/busybox" 2>/dev/null || true
-    }
-else
-    cp "$BB" "$ROOTFS/bin/busybox"
-fi
-chmod +x "$ROOTFS/bin/busybox"
-"$ROOTFS/bin/busybox" --install -s "$ROOTFS/bin/" 2>/dev/null || true
-mkdir -p "$ROOTFS/sbin"
-for u in getty login init reboot poweroff; do
-    ln -sf /bin/busybox "$ROOTFS/sbin/$u" 2>/dev/null || true
+for cmd in debootstrap mksquashfs xorriso grub-mkstandalone mformat mcopy curl git; do
+  require "$cmd"
 done
 
-# DHCP
-for dhcp in udhcpc dhclient; do
-    for p in "/usr/sbin/$dhcp" "/sbin/$dhcp" "/usr/bin/$dhcp"; do
-        [ -f "$p" ] && cp "$p" "$ROOTFS/usr/bin/" && break 2
-    done
-done 2>/dev/null || true
+log "[1/9] Clean workspace"
+sudo rm -rf "$WORK"
+mkdir -p "$ROOTFS" "$ISO"/{casper,boot/grub,EFI/BOOT}
 
-# ── 3. Init scripts ──
-echo "📦 [3/5] Init scripts..."
-cp "$(dirname "$0")/../init/anos-init" "$ROOTFS/sbin/init"
-cp "$(dirname "$0")/../init/anos-install" "$ROOTFS/usr/bin/anos-install"
-chmod +x "$ROOTFS/sbin/init" "$ROOTFS/usr/bin/anos-install"
+log "[2/9] Bootstrap Ubuntu rootfs"
+sudo debootstrap --arch="$ARCH" --variant=minbase "$DISTRO" "$ROOTFS" "$MIRROR"
 
-# ── 4. Kernel + modules + users + config ──
-echo "📦 [4/5] Kernel + modules + config..."
+log "[3/9] Mount virtual filesystems"
+sudo mount --bind /dev "$ROOTFS/dev"
+sudo mount -t devpts devpts "$ROOTFS/dev/pts"
+sudo mount -t proc proc "$ROOTFS/proc"
+sudo mount -t sysfs sysfs "$ROOTFS/sys"
+sudo mount -t tmpfs tmpfs "$ROOTFS/run"
 
-# Kernel
-KERNEL=""
-for k in /boot/vmlinuz /vmlinuz /boot/vmlinuz-*; do
-    [ -f "$k" ] && [ -r "$k" ] && KERNEL="$k" && break
-done
-if [ -n "$KERNEL" ]; then
-    cp "$KERNEL" "$ROOTFS/boot/vmlinuz"
-    echo "  Kernel: $(basename "$KERNEL")"
-fi
+log "[4/9] Configure APT sources"
+sudo tee "$ROOTFS/etc/apt/sources.list" >/dev/null <<EOF
+deb http://archive.ubuntu.com/ubuntu $DISTRO main universe multiverse restricted
+deb http://archive.ubuntu.com/ubuntu $DISTRO-updates main universe multiverse restricted
+deb http://security.ubuntu.com/ubuntu $DISTRO-security main universe multiverse restricted
+EOF
 
-# Modules
-KVER=$(ls /lib/modules/ | head -1)
-if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
-    MOD_DEST="$ROOTFS/lib/modules/$KVER"
-    mkdir -p "$MOD_DEST/kernel/drivers"
-    for cat in ata nvme virtio scsi "usb/storage" block "net/ethernet/intel" "net/ethernet/realtek"; do
-        mkdir -p "$MOD_DEST/kernel/drivers/$cat"
-        find "/lib/modules/$KVER/kernel/drivers/$cat" -name "*.ko*" -exec cp {} "$MOD_DEST/kernel/drivers/$cat/" \; 2>/dev/null || true
-    done
-    for cat in ext2 ext4 vfat isofs squashfs overlayfs xfs btrfs; do
-        mkdir -p "$MOD_DEST/kernel/fs/$cat"
-        find "/lib/modules/$KVER/kernel/fs/$cat" -name "*.ko*" -exec cp {} "$MOD_DEST/kernel/fs/$cat/" \; 2>/dev/null || true
-    done
-    for f in modules.dep modules.alias modules.builtin modules.order; do
-        cp "/lib/modules/$KVER/$f" "$MOD_DEST/" 2>/dev/null || true
-    done
-    echo "  Modules: $KVER"
-fi
+log "[5/9] Install kernel + base system packages"
+run_chroot "apt-get update"
+DEBIAN_FRONTEND=noninteractive run_chroot "apt-get install -y --no-install-recommends \
+  linux-image-generic \
+  linux-firmware \
+  systemd \
+  systemd-sysv \
+  dbus \
+  sudo \
+  network-manager \
+  net-tools \
+  iproute2 \
+  iputils-ping \
+  openssh-server \
+  ca-certificates \
+  curl \
+  wget \
+  git \
+  vim \
+  nano \
+  htop \
+  less \
+  bash-completion \
+  locales \
+  tzdata \
+  grub-pc-bin \
+  grub-efi-amd64-bin \
+  casper \
+  squashfs-tools \
+  initramfs-tools"
+
+log "[6/9] Configure system"
+sudo tee "$ROOTFS/etc/hostname" >/dev/null <<< "$HOSTNAME"
+sudo tee "$ROOTFS/etc/hosts" >/dev/null <<EOF
+127.0.0.1 localhost
+127.0.1.1 $HOSTNAME
+::1       localhost ip6-localhost ip6-loopback
+EOF
+
+# Locale/timezone
+run_chroot "locale-gen en_US.UTF-8 || true"
+run_chroot "update-locale LANG=en_US.UTF-8"
+run_chroot "ln -sf /usr/share/zoneinfo/UTC /etc/localtime"
 
 # Users
-HASH='$6$lHWbbl2fteHvrMve$ifBVepML7plgqJVnqudt1SQLHMakyMv3norKFhLOQWEMUV6NHMZRUQSe68jvSF1/Fbii2/8AsrgnnAtFUVGBp1'
-ANOS_HASH=$(python3 -c "import crypt; print(crypt.crypt('anos', crypt.mksalt(crypt.METHOD_SHA512)))" 2>/dev/null || echo "$HASH")
-ROOT_HASH=$(python3 -c "import crypt; print(crypt.crypt('root', crypt.mksalt(crypt.METHOD_SHA512)))" 2>/dev/null || echo "$HASH")
+run_chroot "echo 'root:$ROOT_PASS' | chpasswd"
+run_chroot "useradd -m -s /bin/bash $DEFAULT_USER || true"
+run_chroot "echo '$DEFAULT_USER:$DEFAULT_PASS' | chpasswd"
+run_chroot "usermod -aG sudo $DEFAULT_USER"
 
-cat > "$ROOTFS/etc/passwd" << EOF
-root:x:0:0:root:/root:/bin/sh
-daemon:x:1:1:daemon:/usr/sbin:/bin/false
-bin:x:2:2:bin:/bin:/bin/false
-sys:x:3:3:sys:/dev:/bin/false
-sync:x:4:65534:sync:/bin:/bin/sync
-anos:x:1000:1000:Anos AI User:/home/anos:/bin/sh
-nobody:x:65534:65534:nobody:/nonexistent:/bin/false
+# Sudo no password for live user
+sudo mkdir -p "$ROOTFS/etc/sudoers.d"
+sudo tee "$ROOTFS/etc/sudoers.d/90-anos" >/dev/null <<EOF
+$DEFAULT_USER ALL=(ALL) NOPASSWD:ALL
+EOF
+sudo chmod 440 "$ROOTFS/etc/sudoers.d/90-anos"
+
+# os-release branding
+sudo tee "$ROOTFS/etc/os-release" >/dev/null <<EOF
+NAME="AnosOS"
+VERSION="1.0.2"
+ID=anos
+ID_LIKE=ubuntu
+PRETTY_NAME="AnosOS 1.0.2 (Ubuntu $DISTRO base)"
+VERSION_ID="1.0.2"
+HOME_URL="https://github.com/datnp1003/anos-os"
 EOF
 
-cat > "$ROOTFS/etc/shadow" << EOF
-root:${ROOT_HASH}:20000:0:99999:7:::
-daemon:*:20000:0:99999:7:::
-bin:*:20000:0:99999:7:::
-sys:*:20000:0:99999:7:::
-sync:*:20000:0:99999:7:::
-anos:${ANOS_HASH}:20000:0:99999:7:::
-nobody:*:20000:0:99999:7:::
+# Enable services
+run_chroot "systemctl enable NetworkManager || true"
+run_chroot "systemctl enable ssh || true"
+
+log "[7/9] Install Anos binaries + service"
+TMPDL="$WORK/download"
+mkdir -p "$TMPDL"
+BASE="$ANOS_REPO/releases/download/$ANOS_VERSION"
+curl -fsSL "$BASE/anosd-linux-$BINARY_ARCH" -o "$TMPDL/anosd"
+curl -fsSL "$BASE/anos-cli-linux-$BINARY_ARCH" -o "$TMPDL/anos-cli"
+chmod +x "$TMPDL/anosd" "$TMPDL/anos-cli"
+sudo install -m 0755 "$TMPDL/anosd" "$ROOTFS/usr/local/bin/anosd"
+sudo install -m 0755 "$TMPDL/anos-cli" "$ROOTFS/usr/local/bin/anos-cli"
+sudo ln -sf /usr/local/bin/anos-cli "$ROOTFS/usr/bin/anos-cli"
+sudo ln -sf /usr/local/bin/anosd "$ROOTFS/usr/bin/anosd"
+
+# Skills + prompt
+git clone --depth 1 "$ANOS_REPO.git" "$TMPDL/repo" 2>/dev/null || true
+sudo mkdir -p "$ROOTFS/opt/anos/skills" "$ROOTFS/opt/anos/config"
+[ -f "$TMPDL/repo/ANOS-SYSTEM-PROMPT.md" ] && sudo cp "$TMPDL/repo/ANOS-SYSTEM-PROMPT.md" "$ROOTFS/opt/anos/" || true
+[ -d "$TMPDL/repo/skills" ] && sudo cp -r "$TMPDL/repo/skills"/* "$ROOTFS/opt/anos/skills/" || true
+
+# anosd systemd service
+sudo tee "$ROOTFS/etc/systemd/system/anosd.service" >/dev/null <<'EOF'
+[Unit]
+Description=Anos AI OS Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=ANOS_DIR=/opt/anos
+Environment=ANOS_SOCKET=/run/anos.sock
+ExecStart=/usr/local/bin/anosd
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+run_chroot "systemctl enable anosd || true"
+
+# auto-login tty1 as anos, then start anos-cli
+sudo mkdir -p "$ROOTFS/etc/systemd/system/getty@tty1.service.d"
+sudo tee "$ROOTFS/etc/systemd/system/getty@tty1.service.d/override.conf" >/dev/null <<EOF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin $DEFAULT_USER --noclear %I \$TERM
 EOF
 
-cat > "$ROOTFS/etc/group" << EOF
-root:x:0:
-daemon:x:1:
-bin:x:2:
-sys:x:3:
-admin:x:100:anos
-anos:x:1000:
-nogroup:x:65534:
-EOF
-
-chmod 644 "$ROOTFS/etc/passwd"; chmod 600 "$ROOTFS/etc/shadow"; chmod 644 "$ROOTFS/etc/group"
-
-# Profile
-cat > "$ROOTFS/etc/profile" << 'PROFILE'
-export PATH=/usr/bin:/bin:/sbin:/usr/sbin
-export ANOS_DIR=/opt/anos
-export ANOS_SOCKET=/tmp/anos.sock
-if [ "$(tty)" = "/dev/tty1" ] && [ "$(whoami)" = "anos" ]; then
-    clear 2>/dev/null || true
-    echo "╔══════════════════════════════════════════════╗"
-    echo "║       🦾 AnosOS - AI Native OS              ║"
-    echo "╚══════════════════════════════════════════════╝"
-    echo ""
-    [ -S /tmp/anos.sock ] && exec /usr/bin/anos-cli || exec /bin/sh
+sudo tee "$ROOTFS/home/$DEFAULT_USER/.bash_profile" >/dev/null <<'EOF'
+if [ "$(tty)" = "/dev/tty1" ]; then
+  echo ""
+  echo "🦾 Welcome to AnosOS"
+  echo "Type 'anos-cli' for AI shell, or use normal Ubuntu commands."
+  echo ""
 fi
-echo ""
-echo "🦾 AnosOS v2.0"
-echo "  anos-cli       AI Shell"
-echo "  anos-install   Install to disk"
-echo ""
-PROFILE
+EOF
+sudo chown "$DEFAULT_USER:$DEFAULT_USER" "$ROOTFS/home/$DEFAULT_USER/.bash_profile"
 
-cat > "$ROOTFS/etc/issue" << 'ISSUE'
+log "[8/9] Cleanup + generate initramfs"
+run_chroot "apt-get clean"
+sudo rm -rf "$ROOTFS/tmp"/* "$ROOTFS/var/tmp"/* "$ROOTFS/var/lib/apt/lists"/*
 
-╔══════════════════════════════════════════════╗
-║       🦾 AnosOS - AI Native OS               ║
-║          v2.0 - \l                            ║
-║──────────────────────────────────────────────║
-║  Login:  anos / anos                         ║
-║  Root:   root / root                         ║
-║  anos-install → install to disk             ║
-╚══════════════════════════════════════════════╝
+# Ensure initramfs generated
+KVER=$(basename "$(ls "$ROOTFS/boot/vmlinuz-"* | sort -V | tail -1 | sed 's#^.*/vmlinuz-##')")
+echo "  Kernel version: $KVER"
+run_chroot "update-initramfs -c -k $KVER || update-initramfs -u -k $KVER"
 
-ISSUE
+log "[9/9] Build SquashFS + ISO"
+cleanup_mounts
+trap - EXIT
 
-echo "anos" > "$ROOTFS/etc/hostname"
-echo "127.0.0.1 localhost anos" > "$ROOTFS/etc/hosts"
+# Copy kernel/initrd
+KERNEL_FILE=$(ls "$ROOTFS/boot/vmlinuz-"* | sort -V | tail -1)
+INITRD_FILE=$(ls "$ROOTFS/boot/initrd.img-"* | sort -V | tail -1)
+sudo cp "$KERNEL_FILE" "$ISO/casper/vmlinuz"
+sudo cp "$INITRD_FILE" "$ISO/casper/initrd"
 
-# ── 5. GRUB + initrd + ISO ──
-echo "📀 [5/5] Building initrd + ISO..."
+# Create squashfs
+sudo mksquashfs "$ROOTFS" "$SQUASHFS" -comp xz -noappend -e boot
 
-# Build minimal initrd (just /init + /bin/sh + kernel modules)
-INITRD="/tmp/anos-initrd"
-rm -rf "$INITRD"; mkdir -p "$INITRD"/{bin,lib/modules}
+# filesystem.size
+sudo du -sx --block-size=1 "$ROOTFS" | cut -f1 | sudo tee "$ISO/casper/filesystem.size" >/dev/null
 
-cp "$(dirname "$0")/../init/initrd-init" "$INITRD/init"
-chmod +x "$INITRD/init"
-
-# Only 1 busybox binary: as /bin/busybox AND /bin/sh (hardlink for shebang)
-cp "$ROOTFS/bin/busybox" "$INITRD/bin/busybox"
-cp "$ROOTFS/bin/busybox" "$INITRD/bin/sh"
-chmod +x "$INITRD/bin/busybox" "$INITRD/bin/sh"
-
-# Kernel modules (initrd needs storage drivers to find CD)
-if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER" ]; then
-    cp -r "/lib/modules/$KVER" "$INITRD/lib/modules/" 2>/dev/null || true
-fi
-
-# Pack initrd
-(cd "$INITRD" && find . | cpio -o -H newc) > /tmp/initrd.img
-cp /tmp/initrd.img "$ROOTFS/boot/initrd.img"
+# Minimal manifest
+run_chroot "dpkg-query -W --showformat='\${Package} \${Version}\n'" | sudo tee "$ISO/casper/filesystem.manifest" >/dev/null || true
 
 # GRUB config
-mkdir -p "$ROOTFS/boot/grub"
-cat > "$ROOTFS/boot/grub/grub.cfg" << 'GRUBCFG'
+cat > "$ISO/boot/grub/grub.cfg" <<'EOF'
 set timeout=5
 set default=0
-loadfont unicode
 
-menuentry "🦾 AnosOS — AI Native OS" {
-    linux /boot/vmlinuz console=tty1 quiet
-    initrd /boot/initrd.img
+menuentry "🦾 AnosOS Live" {
+    linux /casper/vmlinuz boot=casper quiet splash ---
+    initrd /casper/initrd
 }
 
-menuentry "AnosOS — Verbose" {
-    linux /boot/vmlinuz console=tty1
-    initrd /boot/initrd.img
+menuentry "AnosOS Live (verbose)" {
+    linux /casper/vmlinuz boot=casper ---
+    initrd /casper/initrd
 }
 
-menuentry "AnosOS — Rescue" {
-    linux /boot/vmlinuz console=tty1 init=/bin/sh
-    initrd /boot/initrd.img
+menuentry "AnosOS Rescue" {
+    linux /casper/vmlinuz boot=casper single ---
+    initrd /casper/initrd
 }
-GRUBCFG
+EOF
 
-# Build ISO
-if command -v grub-mkrescue &>/dev/null; then
-    grub-mkrescue -o "$OUTPUT" \
-        --modules="part_gpt fat ext2 iso9660 normal boot linux configfile search all_video" \
-        --fonts="" \
-        "$ROOTFS" 2>&1 | tail -3
-elif command -v genisoimage &>/dev/null; then
-    genisoimage -R -r -J -V "$ISO_LABEL" -o "$OUTPUT" \
-        -b boot/grub/grub.cfg -no-emul-boot "$ROOTFS" 2>&1 | tail -3
-elif command -v xorriso &>/dev/null; then
-    xorriso -as mkisofs -R -r -J -V "$ISO_LABEL" -o "$OUTPUT" \
-        -b boot/grub/grub.cfg -no-emul-boot "$ROOTFS" 2>&1 | tail -3
-else
-    echo "❌ No ISO tool"; exit 1
-fi
+# BIOS GRUB image
+mkdir -p "$ISO/boot/grub/i386-pc"
+grub-mkstandalone \
+  --format=i386-pc \
+  --output="$ISO/boot/grub/i386-pc/eltorito.img" \
+  --install-modules="linux normal iso9660 biosdisk memdisk search tar ls" \
+  --modules="linux normal iso9660 biosdisk search" \
+  --locales="" \
+  --fonts="" \
+  "boot/grub/grub.cfg=$ISO/boot/grub/grub.cfg"
 
-# Cleanup
-rm -rf "$ROOTFS" "$INITRD" "$DOWNLOAD_DIR" /tmp/initrd.img 2>/dev/null || true
+# UEFI GRUB image
+mkdir -p "$ISO/EFI/BOOT"
+grub-mkstandalone \
+  --format=x86_64-efi \
+  --output="$ISO/EFI/BOOT/BOOTX64.EFI" \
+  --install-modules="linux normal iso9660 search echo all_video gfxterm" \
+  --modules="linux normal iso9660 search all_video" \
+  --locales="" \
+  --fonts="" \
+  "boot/grub/grub.cfg=$ISO/boot/grub/grub.cfg"
 
-echo ""
-if [ -f "$OUTPUT" ]; then
-    echo "✅ $(ls -lh "$OUTPUT" | awk '{print $5}') - $OUTPUT"
-    echo "   Test: qemu-system-x86_64 -cdrom $OUTPUT -m 2048 -enable-kvm"
-else
-    echo "❌ Build failed"; exit 1
-fi
+# EFI image
+EFI_IMG="$WORK/efiboot.img"
+dd if=/dev/zero of="$EFI_IMG" bs=1M count=10 status=none
+mkfs.vfat "$EFI_IMG" >/dev/null
+mmd -i "$EFI_IMG" ::/EFI ::/EFI/BOOT
+mcopy -i "$EFI_IMG" "$ISO/EFI/BOOT/BOOTX64.EFI" ::/EFI/BOOT/
+
+# Build hybrid ISO
+xorriso -as mkisofs \
+  -iso-level 3 \
+  -full-iso9660-filenames \
+  -volid "$LABEL" \
+  -eltorito-boot boot/grub/i386-pc/eltorito.img \
+  -no-emul-boot \
+  -boot-load-size 4 \
+  -boot-info-table \
+  --eltorito-catalog boot/grub/boot.cat \
+  --grub2-boot-info \
+  --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
+  -eltorito-alt-boot \
+  -e "$(basename "$EFI_IMG")" \
+  -no-emul-boot \
+  -append_partition 2 0xef "$EFI_IMG" \
+  -output "$OUTPUT" \
+  "$ISO"
+
+# ISO checksum
+sha256sum "$OUTPUT" > "$OUTPUT.sha256"
+
+log "✅ Build complete"
+ls -lh "$OUTPUT" "$OUTPUT.sha256"
+echo "Test: qemu-system-x86_64 -m 4096 -cdrom $OUTPUT"
