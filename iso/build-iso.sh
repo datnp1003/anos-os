@@ -211,6 +211,38 @@ done
 # ─────────────────────────────────────────────
 echo "🔧 [4/12] Installing system tools..."
 
+# ── APK (Alpine Package Keeper) → user can apk add docker htop curl git... ──
+echo "  📦 Installing APK package manager..."
+APK_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/${BINARY_ARCH}/apk-tools-static-2.14.9-r0.apk"
+APK_TARBALL="/tmp/apk-tools.apk"
+if curl -fsSL "$APK_URL" -o "$APK_TARBALL" 2>/dev/null; then
+    tar xzf "$APK_TARBALL" -C /tmp/ 2>/dev/null || true
+    if [ -f /tmp/sbin/apk.static ]; then
+        cp /tmp/sbin/apk.static "$ROOTFS/usr/bin/apk"
+        chmod +x "$ROOTFS/usr/bin/apk"
+        mkdir -p "$ROOTFS/etc/apk/keys" "$ROOTFS/lib/apk/db" "$ROOTFS/var/cache/apk"
+        for key in /etc/apk/keys/*.pub; do
+            [ -f "$key" ] && cp "$key" "$ROOTFS/etc/apk/keys/" 2>/dev/null || true
+        done
+        if [ -z "$(ls "$ROOTFS/etc/apk/keys/" 2>/dev/null)" ]; then
+            curl -fsSL "https://alpine.pkgs.org/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub" \
+                -o "$ROOTFS/etc/apk/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub" 2>/dev/null || true
+        fi
+        cat > "$ROOTFS/etc/apk/repositories" << 'APKREPO'
+https://dl-cdn.alpinelinux.org/alpine/v3.21/main
+https://dl-cdn.alpinelinux.org/alpine/v3.21/community
+APKREPO
+        mkdir -p "$ROOTFS/lib/apk/db"
+        touch "$ROOTFS/lib/apk/db/installed"
+        echo "    ✅ APK package manager ready"
+    else
+        echo "    ⚠️  apk.static not found in tarball"
+    fi
+    rm -rf "$APK_TARBALL" /tmp/sbin /tmp/lib 2>/dev/null || true
+else
+    echo "    ⚠️  Cannot download apk-tools — package manager unavailable"
+fi
+
 # parted (for disk partitioning)
 if command -v parted &>/dev/null; then
     cp "$(command -v parted)" "$ROOTFS/usr/sbin/parted"
@@ -434,6 +466,7 @@ echo "🦾 AnosOS v1.0.1"
 echo "─────────────────────"
 $ANOS_READY && echo " AI daemon:  ✅ Online" || echo " AI daemon:  ❌ Offline"
 echo " Type 'anos-install' for installation"
+echo " Type 'apk add <pkg>' to install packages"
 echo " Type 'anos-cli' for AI shell"
 echo " Type 'exit' to log out"
 echo ""
@@ -462,6 +495,7 @@ cat > "$ROOTFS/etc/motd" << 'MOTD'
 Commands:
   anos-cli         Start AI shell
   anos-install     Install to hard disk
+  apk add <pkg>    Install packages (docker, htop, curl, git...)
   exit             Log out
 
 ⚠️  Change default passwords: passwd anos / passwd root

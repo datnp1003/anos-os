@@ -49,6 +49,7 @@ Boot CD/USB → Live System → Login → Anos CLI → AI-powered system managem
 - 🦾 **Auto AI CLI** — tty1 launches `anos-cli` after login
 - 🛟 **Fallback shells** — tty2 (root), tty3 (admin)
 - 💿 **Full disk installer** — `anos-install` with GPT, ext4, GRUB
+- 📦 **Alpine APK** — `apk add docker htop curl git` and 10,000+ packages
 - 🖥️ **UEFI + BIOS dual boot** — boots on both modern and legacy hardware
 - 📦 **Live system** — overlayfs (squashfs + tmpfs) for read-write live environment
 - 🔌 **Kernel modules** — storage (ATA, NVMe, virtio), FS (ext4, vfat, xfs, btrfs), network drivers
