@@ -211,83 +211,66 @@ done
 # ─────────────────────────────────────────────
 echo "🔧 [4/12] Installing system tools..."
 
-# ── APK (Alpine Package Keeper) → user can apk add docker htop curl git... ──
-echo "  📦 Installing APK package manager..."
+# ── APK Package Manager + Base Packages ──
+echo "  📦 Installing APK package manager + base packages..."
 APK_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/${BINARY_ARCH}/apk-tools-static-2.14.9-r0.apk"
 APK_TARBALL="/tmp/apk-tools.apk"
+APK_STATIC="/tmp/apk.static"
+
+# Step A: Download apk-tools-static
 if curl -fsSL "$APK_URL" -o "$APK_TARBALL" 2>/dev/null; then
-    tar xzf "$APK_TARBALL" -C /tmp/ 2>/dev/null || true
+    tar xzf "$APK_TARBALL" -C /tmp/ sbin/apk.static 2>/dev/null || true
     if [ -f /tmp/sbin/apk.static ]; then
-        cp /tmp/sbin/apk.static "$ROOTFS/usr/bin/apk"
-        chmod +x "$ROOTFS/usr/bin/apk"
-        mkdir -p "$ROOTFS/etc/apk/keys" "$ROOTFS/lib/apk/db" "$ROOTFS/var/cache/apk"
-        for key in /etc/apk/keys/*.pub; do
-            [ -f "$key" ] && cp "$key" "$ROOTFS/etc/apk/keys/" 2>/dev/null || true
-        done
-        if [ -z "$(ls "$ROOTFS/etc/apk/keys/" 2>/dev/null)" ]; then
-            curl -fsSL "https://alpine.pkgs.org/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub" \
-                -o "$ROOTFS/etc/apk/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub" 2>/dev/null || true
-        fi
-        cat > "$ROOTFS/etc/apk/repositories" << 'APKREPO'
+        cp /tmp/sbin/apk.static "$APK_STATIC"
+        chmod +x "$APK_STATIC"
+        echo "    ✅ apk-tools downloaded"
+    fi
+    rm -rf "$APK_TARBALL" /tmp/sbin 2>/dev/null || true
+fi
+
+if [ -x "$APK_STATIC" ]; then
+    # Step B: Setup apk config in rootfs
+    cp "$APK_STATIC" "$ROOTFS/usr/bin/apk"
+    chmod +x "$ROOTFS/usr/bin/apk"
+    mkdir -p "$ROOTFS/etc/apk/keys" "$ROOTFS/lib/apk/db" "$ROOTFS/var/cache/apk"
+    touch "$ROOTFS/lib/apk/db/installed"
+
+    # Alpine public keys
+    for key in /etc/apk/keys/*.pub; do
+        [ -f "$key" ] && cp "$key" "$ROOTFS/etc/apk/keys/" 2>/dev/null || true
+    done
+    if [ -z "$(ls "$ROOTFS/etc/apk/keys/" 2>/dev/null)" ]; then
+        curl -fsSL "https://alpine.pkgs.org/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub" \
+            -o "$ROOTFS/etc/apk/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub" 2>/dev/null || true
+    fi
+
+    # Repositories
+    cat > "$ROOTFS/etc/apk/repositories" << 'APKREPO'
 https://dl-cdn.alpinelinux.org/alpine/v3.21/main
 https://dl-cdn.alpinelinux.org/alpine/v3.21/community
 APKREPO
-        mkdir -p "$ROOTFS/lib/apk/db"
-        touch "$ROOTFS/lib/apk/db/installed"
-        echo "    ✅ APK package manager ready"
-    else
-        echo "    ⚠️  apk.static not found in tarball"
-    fi
-    rm -rf "$APK_TARBALL" /tmp/sbin /tmp/lib 2>/dev/null || true
+
+    # Step C: Install base packages into rootfs (nano, curl, htop, SSH, etc.)
+    for pkg in nano curl htop procps-ng ca-certificates-bundle dropbear dropbear-dbclient; do
+        if "$APK_STATIC" add --root "$ROOTFS" --no-cache --no-scripts "$pkg" 2>/dev/null; then
+            echo "    ✅ $pkg"
+        else
+            echo "    ⚠️  $pkg (skipped)"
+        fi
+    done || true
+
+    rm -f "$APK_STATIC"
+    echo "    ✅ APK + base packages ready"
 else
     echo "    ⚠️  Cannot download apk-tools — package manager unavailable"
 fi
-
-# ── Pre-install essential Alpine packages (nano, curl, htop, procps, ca-certificates) ──
-echo "  📦 Pre-installing base packages from Alpine..."
-ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/${BINARY_ARCH}"
-
-# Helper: download + extract apk into rootfs
-install_apk() {
-    local pkg_name="$1"
-    local pkg_ver="$2"
-    local apk_file="/tmp/${pkg_name}.apk"
-    local pkg_url="${ALPINE_MIRROR}/${pkg_name}-${pkg_ver}.apk"
-    if curl -fsSL "$pkg_url" -o "$apk_file" 2>/dev/null; then
-        # APK is tar.gz with .SIGN + .PKGINFO + data
-        tar xzf "$apk_file" -C "$ROOTFS" 2>/dev/null && echo "    ✅ $pkg_name" && return 0
-    fi
-    echo "    ⚠️  $pkg_name (skipped)"
-    return 1
-}
-
-# Core tools (keep ISO small — pick minimal versions)
-install_apk "nano"            "8.4-r0"
-install_apk "curl"            "8.17.0-r0"
-install_apk "htop"            "3.3.0-r4"
-install_apk "procps-ng"       "4.0.4-r2"      # proper ps, top, free
-install_apk "ca-certificates-bundle" "20251003-r0"  # HTTPS/TLS
-install_apk "dropbear"        "2025.87-r0"    # lightweight SSH server
-install_apk "dropbear-dbclient" "2025.87-r0"  # SSH client
 
 # Create default SSH host keys (dropbear)
 mkdir -p "$ROOTFS/etc/dropbear"
 # Keys will be generated on first boot if not present
 
-# Enable dropbear SSH server on boot (via anos-init)
-mkdir -p "$ROOTFS/etc/init.d"
-cat > "$ROOTFS/etc/init.d/dropbear" << 'DROPBEAR'
-#!/bin/sh
-[ -d /etc/dropbear ] || mkdir -p /etc/dropbear
-[ -f /etc/dropbear/dropbear_rsa_host_key ] || dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null
-[ -f /etc/dropbear/dropbear_ecdsa_host_key ] || dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null
-echo "Starting SSH server (port 22)..."
-dropbear -F -p 22 &
-DROPBEAR
-chmod +x "$ROOTFS/etc/init.d/dropbear"
-
 # Clean up
-rm -rf /tmp/*.apk 2>/dev/null || true
+rm -f "$APK_STATIC" /tmp/*.apk 2>/dev/null || true
 
 # parted (for disk partitioning)
 if command -v parted &>/dev/null; then
