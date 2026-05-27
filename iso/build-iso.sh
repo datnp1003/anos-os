@@ -24,7 +24,7 @@ echo "🦾 AnosOS ISO Builder v2"
 echo "  Anos:  $ANOS_VERSION  |  Arch: $ARCH  |  Output: $OUTPUT"
 echo ""
 
-rm -rf "$ROOTFS"
+sudo rm -rf "$ROOTFS" 2>/dev/null || rm -rf "$ROOTFS" 2>/dev/null || true
 mkdir -p "$ROOTFS"/{bin,sbin,boot,dev,etc/init.d,home/anos,opt/anos/{config,skills},proc,run,sys,tmp,usr/bin,var/log,media/cdrom,mnt,root}
 
 DOWNLOAD_DIR="/tmp/anos-dl-$$"
@@ -284,8 +284,10 @@ else
     exit 1
 fi
 
-# Cleanup
-rm -rf "$ROOTFS" "$INITRD_ROOT" /tmp/anos.squashfs /tmp/anos-squash-root "$DOWNLOAD_DIR"
+# Cleanup function (runs on exit)
+cleanup() {
+    sudo rm -rf "$ROOTFS" "$INITRD_ROOT" /tmp/anos.squashfs /tmp/anos-squash-root "$DOWNLOAD_DIR" 2>/dev/null || true
+}
 
 echo ""
 if [ -f "$OUTPUT" ]; then
