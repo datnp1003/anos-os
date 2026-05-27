@@ -243,6 +243,52 @@ else
     echo "    ⚠️  Cannot download apk-tools — package manager unavailable"
 fi
 
+# ── Pre-install essential Alpine packages (nano, curl, htop, procps, ca-certificates) ──
+echo "  📦 Pre-installing base packages from Alpine..."
+ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/${BINARY_ARCH}"
+
+# Helper: download + extract apk into rootfs
+install_apk() {
+    local pkg_name="$1"
+    local pkg_ver="$2"
+    local apk_file="/tmp/${pkg_name}.apk"
+    local pkg_url="${ALPINE_MIRROR}/${pkg_name}-${pkg_ver}.apk"
+    if curl -fsSL "$pkg_url" -o "$apk_file" 2>/dev/null; then
+        # APK is tar.gz with .SIGN + .PKGINFO + data
+        tar xzf "$apk_file" -C "$ROOTFS" 2>/dev/null && echo "    ✅ $pkg_name" && return 0
+    fi
+    echo "    ⚠️  $pkg_name (skipped)"
+    return 1
+}
+
+# Core tools (keep ISO small — pick minimal versions)
+install_apk "nano"            "8.4-r0"
+install_apk "curl"            "8.17.0-r0"
+install_apk "htop"            "3.3.0-r4"
+install_apk "procps-ng"       "4.0.4-r2"      # proper ps, top, free
+install_apk "ca-certificates-bundle" "20251003-r0"  # HTTPS/TLS
+install_apk "dropbear"        "2025.87-r0"    # lightweight SSH server
+install_apk "dropbear-dbclient" "2025.87-r0"  # SSH client
+
+# Create default SSH host keys (dropbear)
+mkdir -p "$ROOTFS/etc/dropbear"
+# Keys will be generated on first boot if not present
+
+# Enable dropbear SSH server on boot (via anos-init)
+mkdir -p "$ROOTFS/etc/init.d"
+cat > "$ROOTFS/etc/init.d/dropbear" << 'DROPBEAR'
+#!/bin/sh
+[ -d /etc/dropbear ] || mkdir -p /etc/dropbear
+[ -f /etc/dropbear/dropbear_rsa_host_key ] || dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null
+[ -f /etc/dropbear/dropbear_ecdsa_host_key ] || dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null
+echo "Starting SSH server (port 22)..."
+dropbear -F -p 22 &
+DROPBEAR
+chmod +x "$ROOTFS/etc/init.d/dropbear"
+
+# Clean up
+rm -rf /tmp/*.apk 2>/dev/null || true
+
 # parted (for disk partitioning)
 if command -v parted &>/dev/null; then
     cp "$(command -v parted)" "$ROOTFS/usr/sbin/parted"
@@ -495,7 +541,11 @@ cat > "$ROOTFS/etc/motd" << 'MOTD'
 Commands:
   anos-cli         Start AI shell
   anos-install     Install to hard disk
-  apk add <pkg>    Install packages (docker, htop, curl, git...)
+  nano             Text editor
+  htop             Process monitor
+  curl             HTTP client
+  ssh user@host    SSH client
+  apk add <pkg>    Install packages (docker, git, vim...)
   exit             Log out
 
 ⚠️  Change default passwords: passwd anos / passwd root

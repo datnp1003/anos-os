@@ -132,6 +132,18 @@ else
     echo "  ⚠️  Anos daemon not responding"
 fi
 
+# ── 7b. Start SSH server (dropbear) ──
+echo "${CYAN}🔐 Starting SSH server...${NC}"
+if command -v dropbear &>/dev/null; then
+    mkdir -p /etc/dropbear
+    [ -f /etc/dropbear/dropbear_rsa_host_key ] || dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null
+    [ -f /etc/dropbear/dropbear_ecdsa_host_key ] || dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null
+    dropbear -F -p 22 &
+    echo "  ✅ SSH server on port 22"
+else
+    echo "  ⚠️  dropbear not found — SSH disabled"
+fi
+
 # ── 8. Rescue mode ──
 if $RESCUE_MODE; then
     echo ""
