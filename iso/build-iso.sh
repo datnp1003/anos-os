@@ -269,12 +269,14 @@ grub-mkstandalone \
   --fonts="" \
   "boot/grub/grub.cfg=$ISO/boot/grub/grub.cfg"
 
-# EFI image
+# EFI image (must also exist inside ISO tree for -e boot/grub/efiboot.img)
 EFI_IMG="$WORK/efiboot.img"
+EFI_IMG_IN_ISO="$ISO/boot/grub/efiboot.img"
 dd if=/dev/zero of="$EFI_IMG" bs=1M count=10 status=none
 mkfs.vfat "$EFI_IMG" >/dev/null
 mmd -i "$EFI_IMG" ::/EFI ::/EFI/BOOT
 mcopy -i "$EFI_IMG" "$ISO/EFI/BOOT/BOOTX64.EFI" ::/EFI/BOOT/
+cp "$EFI_IMG" "$EFI_IMG_IN_ISO"
 
 # Build hybrid ISO
 xorriso -as mkisofs \
@@ -289,13 +291,17 @@ xorriso -as mkisofs \
   --grub2-boot-info \
   --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
   -eltorito-alt-boot \
-  -e "$(basename "$EFI_IMG")" \
+  -e boot/grub/efiboot.img \
   -no-emul-boot \
   -append_partition 2 0xef "$EFI_IMG" \
   -output "$OUTPUT" \
   "$ISO"
 
-# ISO checksum
+# Verify + ISO checksum
+if [ ! -f "$OUTPUT" ]; then
+  echo "❌ ISO build failed: $OUTPUT not found"
+  exit 1
+fi
 sha256sum "$OUTPUT" > "$OUTPUT.sha256"
 
 log "✅ Build complete"
