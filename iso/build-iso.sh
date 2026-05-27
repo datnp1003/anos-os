@@ -8,8 +8,7 @@
 #   - anosd + anos-cli + skills
 #
 # Usage: build-iso.sh [output] [arch] [anos_version]
-set -eo pipefail
-# Note: no -u — CI may have unset vars; guarded with defaults below
+set -exo pipefail
 
 OUTPUT="${1:-anos-os-linux-amd64.iso}"
 ARCH="${2:-amd64}"
@@ -214,7 +213,7 @@ echo "🔧 [4/12] Installing system tools..."
 
 # ── APK Package Manager ── (base packages installed on first boot)
 echo "  📦 Installing APK package manager..."
-APK_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/${BINARY_ARCH}/apk-tools-static-2.14.9-r0.apk"
+APK_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/${BINARY_ARCH}/apk-tools-static-2.14.6-r3.apk"
 APK_TARBALL="/tmp/apk-tools.apk"
 
 if curl -fsSL "$APK_URL" -o "$APK_TARBALL" 2>/dev/null; then
@@ -240,6 +239,7 @@ https://dl-cdn.alpinelinux.org/alpine/v3.21/community
 APKREPO
 
         # Base packages bootstrap script (runs on first boot)
+        mkdir -p "$ROOTFS/etc/profile.d"
         cat > "$ROOTFS/etc/profile.d/first-boot.sh" << 'FIRSTBOOT'
 #!/bin/sh
 # First-boot: install essential tools
@@ -252,7 +252,6 @@ if [ ! -f /etc/.first-boot-done ] && [ -x /usr/bin/apk ] && ping -c1 -W2 dl-cdn.
 fi
 FIRSTBOOT
         chmod +x "$ROOTFS/etc/profile.d/first-boot.sh" || true
-        mkdir -p "$ROOTFS/etc/profile.d"
 
         echo "    ✅ APK package manager ready (base packages install on first boot)"
     fi
@@ -263,10 +262,9 @@ fi
 
 # Create default SSH host keys (dropbear)
 mkdir -p "$ROOTFS/etc/dropbear"
-# Keys will be generated on first boot if not present
 
 # Clean up
-rm -f "$APK_STATIC" /tmp/*.apk 2>/dev/null || true
+rm -f /tmp/*.apk /tmp/apk.static 2>/dev/null || true
 
 # parted (for disk partitioning)
 if command -v parted &>/dev/null; then
