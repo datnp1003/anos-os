@@ -346,12 +346,21 @@ cp "$(dirname "$0")/../init/initrd-init" "$INITRD/init"
 chmod +x "$INITRD/init"
 
 # Busybox in initrd (critical for early boot)
+# CRITICAL: copy busybox directly as /bin/sh and every cmd init uses
+# Symlinks in cpio/initramfs can fail silently → "Attempted to kill init!"
 cp "$ROOTFS/bin/busybox" "$INITRD/bin/busybox"
 chmod +x "$INITRD/bin/busybox"
-for u in sh mount umount cat ls echo mkdir sleep insmod modprobe rmmod find grep mknod switch_root chroot cp ln dd sync reboot; do
-    ln -sf /bin/busybox "$INITRD/bin/$u" 2>/dev/null || true
+
+# Direct copies (not symlinks!) for every command /init uses
+for u in sh mount umount cat ls echo mkdir sleep grep find mknod cp ln dd sync reboot; do
+    cp "$ROOTFS/bin/busybox" "$INITRD/bin/$u"
 done
-ln -sf /bin/busybox "$INITRD/sbin/switch_root" 2>/dev/null || true
+cp "$ROOTFS/bin/busybox" "$INITRD/sbin/switch_root"
+
+# Extra symlinks for less critical commands (ok to fail)
+for u in insmod modprobe rmmod chroot; do
+    ln -sf /bin/busybox "$INITRD/bin/$u" 2>/dev/null || cp "$ROOTFS/bin/busybox" "$INITRD/bin/$u"
+done
 
 # Kernel modules (so storage/FS drivers available before root is mounted)
 if [ -d /lib/modules ]; then
