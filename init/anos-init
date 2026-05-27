@@ -1,217 +1,71 @@
 #!/bin/sh
-# 🦾 AnosOS Init — PID 1 with multi-user support
-# Spawns getty on tty1-tty3 with respawn, anosd in background
-#
-# Two modes:
-#   Live (ISO/USB boot): root is overlayfs (squashfs + tmpfs upper)
-#   Installed (disk):    root is ext4, no overlay
-#
-# Boot params:
-#   live           Force live mode detection
-#   install        Skip login, launch anos-install directly
-#   rescue         Boot into root shell
-set -e
+# 🦾 AnosOS Init — PID 1 via busybox init
+# Uses /etc/inittab (busybox-style). No squashfs, no overlay needed.
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-# Detect boot mode from kernel cmdline
-LIVE_MODE=false
-INSTALL_MODE=false
-RESCUE_MODE=false
-
-if grep -q 'live' /proc/cmdline 2>/dev/null; then
-    LIVE_MODE=true
-fi
-if grep -q 'install' /proc/cmdline 2>/dev/null; then
-    INSTALL_MODE=true
-fi
-if grep -q 'rescue\|init=/bin/sh' /proc/cmdline 2>/dev/null; then
-    RESCUE_MODE=true
-fi
-
-# Auto-detect live if overlay found at /
-if mountpoint -q / 2>/dev/null && grep -q overlay /proc/mounts 2>/dev/null; then
-    LIVE_MODE=true
-fi
-
-echo ""
-echo "╔══════════════════════════════════════════════╗"
-echo "║       🦾 AnosOS — AI Native OS              ║"
-echo "║          v1.0.1 — booting...               ║"
-if $LIVE_MODE; then
-    echo "║          Mode: Live (USB/ISO)                ║"
-else
-    echo "║          Mode: Installed (Disk)              ║"
-fi
-echo "╚══════════════════════════════════════════════╝"
-echo ""
-
-# ── 1. Mount virtual filesystems ──
-echo "${CYAN}📀 Mounting filesystems...${NC}"
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 mkdir -p /dev/pts /tmp /run /home/anos
-mount -t devpts devpts /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null || true
 
-# ── 2. Ensure basic devices ──
+# Devices
 for dev in tty0 tty1 tty2 tty3 tty4 console null zero random urandom; do
-    [ -e "/dev/$dev" ] || mknod "/dev/$dev" c 4 "$(echo "$dev" | sed 's/tty//')" 2>/dev/null || true
+    [ -e "/dev/$dev" ] || mknod "/dev/$dev" c 4 $(echo "$dev" | sed 's/tty//') 2>/dev/null || true
 done
 [ -e /dev/console ] || mknod /dev/console c 5 1 2>/dev/null || true
 [ -e /dev/null ] || mknod /dev/null c 1 3 2>/dev/null || true
-[ -e /dev/tty0 ] || mknod /dev/tty0 c 4 0 2>/dev/null || true
 
-# ── 3. Load modules for installed system ──
-if [ -d /lib/modules ]; then
-    KVER=$(ls /lib/modules/ | head -1)
-    MODDIR="/lib/modules/$KVER"
-    
-    # Storage + FS
-    for mod in ata_piix ahci nvme virtio_blk virtio_pci sd_mod sr_mod \
-               ext4 ext2 vfat isofs loop squashfs overlay usb_storage; do
-        find "$MODDIR" -name "${mod}.ko*" -exec insmod {} \; 2>/dev/null || true
-    done
-fi
-
-# ── 4. Network ──
-echo "${CYAN}🌐 Setting up network...${NC}"
+# Network
 NET_ONLINE=false
-
 for mod in e1000 e1000e r8169 virtio_net tg3 igb; do
     modprobe $mod 2>/dev/null || find /lib/modules -name "${mod}.ko*" -exec insmod {} \; 2>/dev/null || true
 done
-
-# Try DHCP on all available interfaces
 for iface in eth0 enp0s3 ens3 ens4 enp1s0; do
     if [ -e "/sys/class/net/$iface" ]; then
         ip link set "$iface" up 2>/dev/null
-        if udhcpc -i "$iface" -n -q -t 5 2>/dev/null; then
-            NET_ONLINE=true
-            echo "  ✅ Connected: $iface"
-            break
-        elif dhclient -1 -q "$iface" 2>/dev/null; then
-            NET_ONLINE=true
-            echo "  ✅ Connected via dhclient: $iface"
-            break
-        fi
+        udhcpc -i "$iface" -n -q -t 5 2>/dev/null && NET_ONLINE=true && echo "  ✅ $iface" && break
     fi
 done
 
-# ── 5. Hostname ──
+# Hostname
 hostname anos 2>/dev/null || echo "anos" > /proc/sys/kernel/hostname
 echo "127.0.0.1 localhost anos" > /etc/hosts
-echo "::1       localhost" >> /etc/hosts
 
-# ── 6. Setup Anos environment ──
+# Anos daemon
 export ANOS_DIR=/opt/anos
 export ANOS_SOCKET=/tmp/anos.sock
-
 mkdir -p /opt/anos/config /home/anos/.anos
 chown anos:anos /home/anos /home/anos/.anos 2>/dev/null || true
-ln -sf /opt/anos /home/anos/.anos 2>/dev/null || true
 
-# ── 7. Start Anos Daemon ──
-echo "${CYAN}🦾 Starting AI daemon...${NC}"
+echo "🦾 Starting Anos daemon..."
 /usr/bin/anosd &
-ANOSD_PID=$!
+for i in $(seq 1 50); do [ -S /tmp/anos.sock ] && break; sleep 0.1; done
 
-# Wait for socket (max 5s)
-for i in $(seq 1 50); do
-    [ -S /tmp/anos.sock ] && break
-    sleep 0.1
-done
-
-if [ -S /tmp/anos.sock ]; then
-    echo "  ✅ Anos daemon ready"
-else
-    echo "  ⚠️  Anos daemon not responding"
-fi
-
-# ── 7b. Start SSH server (dropbear) ──
-echo "${CYAN}🔐 Starting SSH server...${NC}"
-if command -v dropbear &>/dev/null; then
-    mkdir -p /etc/dropbear
-    [ -f /etc/dropbear/dropbear_rsa_host_key ] || dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null
-    [ -f /etc/dropbear/dropbear_ecdsa_host_key ] || dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null
-    dropbear -F -p 22 &
-    echo "  ✅ SSH server on port 22"
-else
-    echo "  ⚠️  dropbear not found — SSH disabled"
-fi
-
-# ── 8. Rescue mode ──
-if $RESCUE_MODE; then
-    echo ""
-    echo "${RED}🆘 Rescue mode — root shell${NC}"
-    echo "   Type 'exit' to reboot."
-    exec /bin/sh
-fi
-
-# ── 9. Install mode (auto-launch installer on tty1) ──
-if $INSTALL_MODE; then
-    echo ""
-    echo "${YELLOW}💿 Installation mode — launching installer...${NC}"
-    exec /usr/bin/anos-install
-fi
-
-# ── 10. Print welcome ──
 clear 2>/dev/null || printf "\033[2J\033[H"
 echo ""
 echo "╔══════════════════════════════════════════════╗"
 echo "║       🦾 AnosOS — AI Native OS              ║"
-echo "║          v1.0.1 — Ready                    ║"
+echo "║          v2.0 — Ready                      ║"
 echo "╠══════════════════════════════════════════════╣"
 if $NET_ONLINE; then
     echo "║  🌐 Network: Online                         ║"
-    echo "║  🧠 AI:      Ready (DeepSeek v4 Pro)        ║"
 else
-    echo "║  🌐 Network: Offline (local tools only)     ║"
+    echo "║  🌐 Network: Offline                        ║"
 fi
 echo "╠══════════════════════════════════════════════╣"
-echo "║                                              ║"
 echo "║  Login:  anos / anos                         ║"
 echo "║  Root:   root / root                         ║"
-echo "║                                              ║"
-if $LIVE_MODE; then
-    echo "║  💿 Type 'anos-install' to install to disk  ║"
-fi
-echo "║  ⚠️  CHANGE ALL PASSWORDS on first login!   ║"
-echo "║                                              ║"
+echo "║  ⚠️  CHANGE PASSWORDS on first login!       ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
-# ── 11. Spawn getty processes with respawn ──
-respawn_getty() {
-    local tty="$1"
-    local baud="${2:-38400}"
-    while true; do
-        /sbin/getty "$baud" "$tty"
-        sleep 1
-    done
-}
-
+# Spawn getty on tty1-3 with respawn
 for tty in tty1 tty2 tty3; do
-    respawn_getty "$tty" 38400 &
+    while true; do
+        /sbin/getty 38400 "$tty"
+        sleep 1
+    done &
 done
 
-# ── 12. PID 1: reap children, keep system alive ──
-cleanup() {
-    echo ""
-    echo "🦾 Shutting down..."
-    kill $ANOSD_PID 2>/dev/null || true
-    kill $(jobs -p) 2>/dev/null || true
-    sync
-    umount -a -r 2>/dev/null || true
-    echo "Power down."
-    exit 0
-}
-trap cleanup SIGTERM SIGINT SIGUSR1
-
-while true; do
-    wait -n 2>/dev/null || true
-done
+# Reap children
+while true; do wait -n 2>/dev/null || true; done

@@ -1,83 +1,61 @@
 #!/bin/sh
-# 🦾 AnosOS — Initrd Init (Stage 1)
-# Minimal initramfs. Runs before root is mounted.
-#
-# Strategy: only busybox + /init in initrd, everything else on squashfs
+# 🦾 AnosOS Initrd — Ultra-minimal
+# Only 2 files needed: /init + /bin/sh (busybox hardlink)
+# All commands used MUST be busybox builtins
 
-echo ""
-echo "🦾 AnosOS Initrd — Stage 1"
-
-# ── 1. Create essential dirs and symlinks from single busybox ──
-# We only shipped 1 busybox binary to keep initrd small
-mount -t proc proc /proc 2>/dev/null
-mount -t sysfs sys /sys 2>/dev/null
-mount -t devtmpfs dev /dev 2>/dev/null
-mkdir -p /dev/pts /tmp /cdrom /newroot /lower /upper /work
-mount -t devpts devpts /dev/pts 2>/dev/null || true
-
-# Create busybox symlinks dynamically (avoids large initrd)
-/bin/busybox --install -s /bin/ 2>/dev/null
-mkdir -p /sbin
-ln -sf /bin/busybox /sbin/switch_root 2>/dev/null || true
-
-# ── 2. Load essential kernel modules ──
+# Load ALL kernel modules we can find (storage drivers needed for CD/USB)
+echo "🦾 Loading modules..."
 if [ -d /lib/modules ]; then
-    MODDIR="/lib/modules/$(ls /lib/modules/ | head -1)/kernel/drivers"
-    # Only storage + squashfs + loop — keep it minimal
-    for mod in ata_piix ahci virtio_blk virtio_pci virtio_scsi \
-               nvme nvme_core sd_mod sr_mod usb_storage \
-               loop squashfs overlay; do
-        find "$MODDIR" -name "${mod}.ko*" -exec insmod {} \; 2>/dev/null || true
-    done
+    find /lib/modules -name '*.ko*' -exec /bin/busybox insmod {} \; 2>/dev/null
 fi
 
-# ── 3. Find anos.squashfs ──
-# Priority: embedded in initrd → CD/DVD → USB stick
-SQUASHFS=""
-for loc in /anos.squashfs; do
-    [ -f "$loc" ] && SQUASHFS="$loc" && echo "  Found: $loc" && break
+# Mount proc/sys/dev
+/bin/busybox mount -t proc proc /proc 2>/dev/null
+/bin/busybox mount -t sysfs sys /sys 2>/dev/null
+/bin/busybox mount -t devtmpfs dev /dev 2>/dev/null
+/bin/busybox mkdir -p /dev/pts /tmp /cdrom
+/bin/busybox mount -t devpts devpts /dev/pts 2>/dev/null || true
+
+# Wait for storage
+/bin/busybox sleep 2
+
+# Try to mount CD on sr0/sr1
+echo "🔍 Looking for AnosOS CD..."
+FOUND=0
+for dev in sr0 sr1; do
+    if [ -b "/dev/$dev" ]; then
+        if /bin/busybox mount -t iso9660 -o ro "/dev/$dev" /cdrom 2>/dev/null; then
+            if [ -f /cdrom/sbin/init ] || [ -f /cdrom/bin/sh ]; then
+                FOUND=1 && echo "✅ Found on /dev/$dev"
+                break
+            fi
+            /bin/busybox umount /cdrom 2>/dev/null || true
+        fi
+    fi
 done
 
-if [ -z "$SQUASHFS" ]; then
-    # Try CD/DVD
-    for dev in sr0 sr1; do
-        [ -b "/dev/$dev" ] && mount -t iso9660 -o ro "/dev/$dev" /cdrom 2>/dev/null && {
-            [ -f /cdrom/anos.squashfs ] && SQUASHFS=/cdrom/anos.squashfs && echo "  Found on /dev/$dev" && break
-            umount /cdrom 2>/dev/null || true
-        }
+# Fallback: list all block devices and try each
+if [ $FOUND -eq 0 ]; then
+    for dev in $(/bin/busybox ls /dev/sd* /dev/vd* /dev/nvme* 2>/dev/null); do
+        if /bin/busybox mount -t iso9660 -o ro "$dev" /cdrom 2>/dev/null; then
+            if [ -f /cdrom/sbin/init ] || [ -f /cdrom/bin/sh ]; then
+                FOUND=1 && echo "✅ Found on $dev" && break
+            fi
+            /bin/busybox umount /cdrom 2>/dev/null || true
+        fi
     done
 fi
 
-if [ -z "$SQUASHFS" ]; then
-    # Try block devices
-    for dev in $(ls /dev/sd? /dev/vd? /dev/nvme?n1 2>/dev/null); do
-        mount -t iso9660 -o ro "$dev" /cdrom 2>/dev/null && {
-            [ -f /cdrom/anos.squashfs ] && SQUASHFS=/cdrom/anos.squashfs && echo "  Found on $dev" && break
-            umount /cdrom 2>/dev/null || true
-        }
-    done
+if [ $FOUND -eq 0 ]; then
+    echo "❌ Cannot find AnosOS rootfs"
+    echo "   Dropping to shell..."
+    exec /bin/busybox sh
 fi
 
-if [ -z "$SQUASHFS" ]; then
-    echo ""
-    echo "❌ Cannot find anos.squashfs — dropping to emergency shell"
-    exec /bin/sh
-fi
+# Pivot to CD root
+echo "🦾 Booting..."
+/bin/busybox mount --move /proc /cdrom/proc 2>/dev/null || true
+/bin/busybox mount --move /sys /cdrom/sys 2>/dev/null || true
+/bin/busybox mount --move /dev /cdrom/dev 2>/dev/null || true
 
-# ── 4. Mount root (squashfs + tmpfs overlay) ──
-echo "  Mounting root..."
-mount -t squashfs -o ro,loop "$SQUASHFS" /lower
-mount -t tmpfs tmpfs /upper -o size=256M
-mkdir -p /upper/upper /upper/work
-mount -t overlay overlay -o lowerdir=/lower,upperdir=/upper/upper,workdir=/upper/work /newroot
-
-# ── 5. Switch to new root ──
-mount --move /proc /newroot/proc
-mount --move /sys /newroot/sys
-mount --move /dev /newroot/dev
-
-echo "  Switching root..."
-exec switch_root /newroot /sbin/init "$@"
-
-# Emergency fallback
-exec /bin/sh
+exec /bin/busybox switch_root /cdrom /sbin/init
