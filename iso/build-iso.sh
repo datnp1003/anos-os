@@ -8,7 +8,8 @@
 #   - anosd + anos-cli + skills
 #
 # Usage: build-iso.sh [output] [arch] [anos_version]
-set -euo pipefail
+set -eo pipefail
+# Note: no -u — CI may have unset vars; guarded with defaults below
 
 OUTPUT="${1:-anos-os-linux-amd64.iso}"
 ARCH="${2:-amd64}"
@@ -211,58 +212,53 @@ done
 # ─────────────────────────────────────────────
 echo "🔧 [4/12] Installing system tools..."
 
-# ── APK Package Manager + Base Packages ──
-echo "  📦 Installing APK package manager + base packages..."
+# ── APK Package Manager ── (base packages installed on first boot)
+echo "  📦 Installing APK package manager..."
 APK_URL="https://dl-cdn.alpinelinux.org/alpine/v3.21/main/${BINARY_ARCH}/apk-tools-static-2.14.9-r0.apk"
 APK_TARBALL="/tmp/apk-tools.apk"
-APK_STATIC="/tmp/apk.static"
 
-# Step A: Download apk-tools-static
 if curl -fsSL "$APK_URL" -o "$APK_TARBALL" 2>/dev/null; then
     tar xzf "$APK_TARBALL" -C /tmp/ sbin/apk.static 2>/dev/null || true
     if [ -f /tmp/sbin/apk.static ]; then
-        cp /tmp/sbin/apk.static "$APK_STATIC"
-        chmod +x "$APK_STATIC"
-        echo "    ✅ apk-tools downloaded"
-    fi
-    rm -rf "$APK_TARBALL" /tmp/sbin 2>/dev/null || true
-fi
+        cp /tmp/sbin/apk.static "$ROOTFS/usr/bin/apk"
+        chmod +x "$ROOTFS/usr/bin/apk"
+        mkdir -p "$ROOTFS/etc/apk/keys" "$ROOTFS/lib/apk/db" "$ROOTFS/var/cache/apk"
+        touch "$ROOTFS/lib/apk/db/installed"
 
-if [ -x "$APK_STATIC" ]; then
-    # Step B: Setup apk config in rootfs
-    cp "$APK_STATIC" "$ROOTFS/usr/bin/apk"
-    chmod +x "$ROOTFS/usr/bin/apk"
-    mkdir -p "$ROOTFS/etc/apk/keys" "$ROOTFS/lib/apk/db" "$ROOTFS/var/cache/apk"
-    touch "$ROOTFS/lib/apk/db/installed"
+        # Alpine keys
+        for key in /etc/apk/keys/*.pub; do
+            [ -f "$key" ] && cp "$key" "$ROOTFS/etc/apk/keys/" 2>/dev/null || true
+        done
+        if [ -z "$(ls "$ROOTFS/etc/apk/keys/" 2>/dev/null)" ]; then
+            curl -fsSL "https://alpine.pkgs.org/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub" \
+                -o "$ROOTFS/etc/apk/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub" 2>/dev/null || true
+        fi
 
-    # Alpine public keys
-    for key in /etc/apk/keys/*.pub; do
-        [ -f "$key" ] && cp "$key" "$ROOTFS/etc/apk/keys/" 2>/dev/null || true
-    done
-    if [ -z "$(ls "$ROOTFS/etc/apk/keys/" 2>/dev/null)" ]; then
-        curl -fsSL "https://alpine.pkgs.org/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub" \
-            -o "$ROOTFS/etc/apk/keys/alpine-devel@lists.alpinelinux.org-4a6a0840.rsa.pub" 2>/dev/null || true
-    fi
-
-    # Repositories
-    cat > "$ROOTFS/etc/apk/repositories" << 'APKREPO'
+        cat > "$ROOTFS/etc/apk/repositories" << 'APKREPO'
 https://dl-cdn.alpinelinux.org/alpine/v3.21/main
 https://dl-cdn.alpinelinux.org/alpine/v3.21/community
 APKREPO
 
-    # Step C: Install base packages into rootfs (nano, curl, htop, SSH, etc.)
-    for pkg in nano curl htop procps-ng ca-certificates-bundle dropbear dropbear-dbclient; do
-        if "$APK_STATIC" add --root "$ROOTFS" --no-cache --no-scripts "$pkg" 2>/dev/null; then
-            echo "    ✅ $pkg"
-        else
-            echo "    ⚠️  $pkg (skipped)"
-        fi
-    done || true
+        # Base packages bootstrap script (runs on first boot)
+        cat > "$ROOTFS/etc/profile.d/first-boot.sh" << 'FIRSTBOOT'
+#!/bin/sh
+# First-boot: install essential tools
+if [ ! -f /etc/.first-boot-done ] && [ -x /usr/bin/apk ] && ping -c1 -W2 dl-cdn.alpinelinux.org >/dev/null 2>&1; then
+    echo "🛠️  First boot — installing base packages (nano, curl, htop, SSH)..."
+    apk update --quiet 2>/dev/null
+    apk add --no-cache nano curl htop procps-ng ca-certificates-bundle dropbear dropbear-dbclient 2>/dev/null
+    touch /etc/.first-boot-done
+    echo "✅ Base packages installed"
+fi
+FIRSTBOOT
+        chmod +x "$ROOTFS/etc/profile.d/first-boot.sh" || true
+        mkdir -p "$ROOTFS/etc/profile.d"
 
-    rm -f "$APK_STATIC"
-    echo "    ✅ APK + base packages ready"
+        echo "    ✅ APK package manager ready (base packages install on first boot)"
+    fi
+    rm -rf "$APK_TARBALL" /tmp/sbin 2>/dev/null || true
 else
-    echo "    ⚠️  Cannot download apk-tools — package manager unavailable"
+    echo "    ⚠️  Cannot download apk-tools"
 fi
 
 # Create default SSH host keys (dropbear)
