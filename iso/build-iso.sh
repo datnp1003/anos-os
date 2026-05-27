@@ -8,7 +8,8 @@
 #   - anosd + anos-cli + skills
 #
 # Usage: build-iso.sh [output] [arch] [anos_version]
-set -exo pipefail
+# set -x  # Debug mode (uncomment to see CI logs)
+# No set -e — script handles errors explicitly at each step
 
 OUTPUT="${1:-anos-os-linux-amd64.iso}"
 ARCH="${2:-amd64}"
